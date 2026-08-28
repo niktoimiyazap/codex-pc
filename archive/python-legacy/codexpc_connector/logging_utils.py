@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import json
 import logging
-from logging.handlers import RotatingFileHandler
+import queue
+from logging.handlers import QueueHandler, QueueListener, RotatingFileHandler
 from pathlib import Path
 from typing import Any
 
 from .config import Settings
 from .security import redact
+
+_LISTENERS: dict[str, QueueListener] = {}
 
 
 class JsonFormatter(logging.Formatter):
@@ -29,23 +32,34 @@ class JsonFormatter(logging.Formatter):
 def configure_logging(settings: Settings) -> logging.Logger:
     settings.log_dir.mkdir(parents=True, exist_ok=True)
     logger = logging.getLogger("codexpc")
+    close_logging(logger)
     logger.setLevel(getattr(logging, settings.log_level, logging.INFO))
     logger.propagate = False
-    for existing in list(logger.handlers):
-        existing.close()
-        logger.removeHandler(existing)
-    handler = RotatingFileHandler(
+
+    file_handler = RotatingFileHandler(
         Path(settings.log_dir) / "connector.jsonl",
         maxBytes=5 * 1024 * 1024,
         backupCount=3,
         encoding="utf-8",
     )
-    handler.setFormatter(JsonFormatter())
-    logger.addHandler(handler)
+    file_handler.setFormatter(JsonFormatter())
+    log_queue: queue.SimpleQueue[logging.LogRecord] = queue.SimpleQueue()
+    queue_handler = QueueHandler(log_queue)
+    logger.addHandler(queue_handler)
+
+    listener = QueueListener(log_queue, file_handler, respect_handler_level=True)
+    listener.start()
+    _LISTENERS[logger.name] = listener
     return logger
 
 
 def close_logging(logger: logging.Logger) -> None:
+    listener = _LISTENERS.pop(logger.name, None)
+    if listener is not None:
+        listener.stop()
+        for handler in listener.handlers:
+            handler.flush()
+            handler.close()
     for handler in list(logger.handlers):
         handler.flush()
         handler.close()

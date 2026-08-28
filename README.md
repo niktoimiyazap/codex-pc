@@ -2,9 +2,9 @@
 
 [English](README.md) | [Русский](README.ru.md)
 
-> A local MCP stdio adapter for Codex app-server, guarded filesystem access, managed process execution, and downstream MCP routing.
+> A thin MCP stdio adapter over the original Codex app-server, with downstream MCP routing and native Windows desktop control.
 
-[![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![Go 1.26+](https://img.shields.io/badge/Go-1.26%2B-00ADD8?logo=go&logoColor=white)](https://go.dev/)
 [![MCP](https://img.shields.io/badge/Protocol-MCP-111827)](https://modelcontextprotocol.io/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-22C55E.svg)](LICENSE)
 [![CI](https://img.shields.io/github/actions/workflow/status/niktoimiyazap/codex-mcp-router/test.yml?branch=main&label=tests)](https://github.com/niktoimiyazap/codex-mcp-router/actions)
@@ -42,7 +42,7 @@ The connector starts one long-lived `codex app-server --stdio` process and creat
 
 ## Requirements
 
-- Python 3.11 or newer;
+- Go 1.26 or newer (only required to build from source);
 - Codex CLI with `codex app-server` support;
 - an authenticated Codex installation;
 - MCP servers configured through Codex when downstream routing is needed.
@@ -52,15 +52,19 @@ The connector starts one long-lived `codex app-server --stdio` process and creat
 ```bash
 git clone https://github.com/niktoimiyazap/codex-mcp-router.git
 cd codex-mcp-router
-python -m pip install -e .
-codexpc-connector
+go build -o dist/codexpc-go.exe ./cmd/codexpc
 ```
 
-Windows without package installation:
+Windows recommended build and run:
 
 ```bat
+build-go.cmd
 wrapper.cmd
 ```
+
+`build-go.cmd` runs formatting, tests, build, a smoke test, deploys `dist\codexpc-go.exe`, and copies the binary to the Desktop when possible.
+
+The former Python runtime is preserved only under `archive/python-legacy/` for historical reference and regression comparison.
 
 ## Interactive tunnel launcher
 
@@ -93,12 +97,10 @@ Minimal example:
 workspace = "~/projects"
 allowed_roots = ["~/projects"]
 
-enable_process = false
-enable_shell = false
-enable_delete = true
+tool_profile = "core"
 ```
 
-Process execution requires `enable_process=true`. Shell command strings additionally require `enable_shell=true`.
+The connector is intentionally thin. Filesystem and terminal operations are delegated to the original Codex app-server. The connector keeps path-policy checks, MCP routing, response normalization, and native Windows desktop control.
 
 See [Configuration](docs/CONFIGURATION.md) for all options.
 
@@ -106,23 +108,27 @@ See [Configuration](docs/CONFIGURATION.md) for all options.
 
 ### Filesystem
 
-`read_file`, `write_file`, `list_dir`, `create_directory`, `copy_path`, `delete_path`, `download_url`, `save_uploaded_file`
+`fs_read_file`, `fs_write_file`, `fs_read_directory`, `fs_create_directory`, `fs_copy`, `fs_remove`
 
-Text writes are UTF-8 by default, atomic, and reject likely mojibake or legacy-encoding corruption.
+These tools are validated adapters over the original Codex `fs/*` methods. The connector no longer contains a patch engine, file snapshot cache, project walker, or direct filesystem implementation.
 
-### Processes
+### Terminal
 
-`run_process`, `run_command`, `get_job`, `wait`, `list_jobs`, `cancel_job`
+`command_exec`
 
-Background jobs expose explicit states:
+Commands are passed as argv vectors to the original Codex `command/exec` method. The connector no longer owns subprocesses or a background job manager.
 
-```text
-queued, running, completed, failed, timed_out, cancelled, killed
-```
+### Desktop control
+
+`computer`
+
+Native Windows screenshot, mouse, keyboard, and scrolling support remains local.
 
 ### MCP routing
 
-`mcp_list_servers`, `mcp_list_tools`, `mcp_search_tools`, `mcp_call`
+`mcp_discover`, `mcp_call`
+
+`mcp_discover` lists or searches configured MCP servers and tools from one shared persistent inventory cache. Stale data is returned immediately while a background refresh updates it. The `full` profile additionally exposes `mcp_list_servers`, `mcp_list_tools`, and `mcp_search_tools` as compatibility aliases.
 
 ### Connector control
 
@@ -131,17 +137,15 @@ queued, running, completed, failed, timed_out, cancelled, killed
 ## Verification
 
 ```bash
-python -m ruff check codexpc_connector scripts tests main.py
-python -m unittest discover -s tests -v
-python scripts/self_check.py
-python -m bandit -q -r codexpc_connector
+go fmt ./cmd/... ./internal/...
+go test ./...
+go build -trimpath -o dist/codexpc-go.exe ./cmd/codexpc
 ```
 
-Integration smoke tests:
+On Windows the complete verification pipeline is:
 
-```bash
-python scripts/smoke_processes.py
-python scripts/smoke_stdio.py
+```bat
+build-go.cmd
 ```
 
 ## Documentation

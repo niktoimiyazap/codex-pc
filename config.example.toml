@@ -1,20 +1,9 @@
-# Paths may use / on every supported operating system.
 workspace = "~/projects"
 allowed_roots = ["~/projects"]
 
-# Safer public defaults.
-enable_shell = false
-enable_process = false
-enable_delete = true
-
-discovery_ttl_sec = 30
-mcp_idle_timeout_sec = 900
-default_startup_timeout_sec = 30
 default_tool_timeout_sec = 120
-
 max_output_chars = 100000
-max_read_chars = 500000
-max_edit_file_bytes = 20971520
-max_search_file_bytes = 5242880
-max_background_tasks = 32
+mcp_inventory_ttl_sec = 300
+
+tool_profile = "core"
 log_level = "INFO"

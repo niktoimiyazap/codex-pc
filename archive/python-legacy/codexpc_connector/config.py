@@ -18,14 +18,6 @@ def _default_state_dir() -> Path:
     return base / "codexpc-connector"
 
 
-def _as_bool(value: Any, default: bool) -> bool:
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    return str(value).strip().lower() in {"1", "true", "yes", "on"}
-
-
 def _as_paths(value: Any, fallback: list[Path]) -> list[Path]:
     if value is None:
         return fallback
@@ -39,23 +31,22 @@ def _as_paths(value: Any, fallback: list[Path]) -> list[Path]:
     return paths or fallback
 
 
+def _as_tool_profile(value: Any) -> str:
+    profile = str(value or "core").strip().lower()
+    if profile not in {"core", "full"}:
+        raise ValueError("tool_profile must be core or full")
+    return profile
+
+
 @dataclass(slots=True)
 class Settings:
     state_dir: Path
     workspace: Path
     allowed_roots: list[Path] = field(default_factory=list)
-    enable_shell: bool = False
-    enable_process: bool = False
-    enable_delete: bool = True
-    discovery_ttl_sec: float = 600.0
-    mcp_idle_timeout_sec: float = 900.0
-    default_startup_timeout_sec: float = 30.0
     default_tool_timeout_sec: float = 120.0
     max_output_chars: int = 100_000
-    max_read_chars: int = 500_000
-    max_search_file_bytes: int = 5 * 1024 * 1024
-    max_edit_file_bytes: int = 20 * 1024 * 1024
-    max_background_tasks: int = 32
+    mcp_inventory_ttl_sec: float = 300.0
+    tool_profile: str = "core"
     log_level: str = "INFO"
 
     @property
@@ -68,7 +59,12 @@ class Settings:
 
     @classmethod
     def load(cls) -> Settings:
-        state_dir = _default_state_dir()
+        state_override = os.environ.get("CODEXPC_STATE_DIR")
+        state_dir = (
+            Path(os.path.expandvars(os.path.expanduser(state_override))).resolve()
+            if state_override
+            else _default_state_dir()
+        )
         state_dir.mkdir(parents=True, exist_ok=True)
         config_path = state_dir / "config.toml"
         raw: dict[str, Any] = {}
@@ -78,11 +74,7 @@ class Settings:
 
         home = Path.home().resolve()
         workspace = Path(
-            os.path.expandvars(
-                os.path.expanduser(
-                    os.environ.get("CODEXPC_WORKSPACE", str(raw.get("workspace", home)))
-                )
-            )
+            os.path.expandvars(os.path.expanduser(os.environ.get("CODEXPC_WORKSPACE", str(raw.get("workspace", home)))))
         ).resolve()
         allowed_roots = _as_paths(
             os.environ.get("CODEXPC_ALLOWED_ROOTS", raw.get("allowed_roots")),
@@ -93,23 +85,9 @@ class Settings:
             state_dir=state_dir,
             workspace=workspace,
             allowed_roots=allowed_roots,
-            enable_shell=_as_bool(
-                os.environ.get("CODEXPC_ENABLE_SHELL", raw.get("enable_shell")), False
-            ),
-            enable_process=_as_bool(
-                os.environ.get("CODEXPC_ENABLE_PROCESS", raw.get("enable_process")), False
-            ),
-            enable_delete=_as_bool(
-                os.environ.get("CODEXPC_ENABLE_DELETE", raw.get("enable_delete")), True
-            ),
-            discovery_ttl_sec=float(raw.get("discovery_ttl_sec", 600.0)),
-            mcp_idle_timeout_sec=float(raw.get("mcp_idle_timeout_sec", 900.0)),
-            default_startup_timeout_sec=float(raw.get("default_startup_timeout_sec", 30.0)),
             default_tool_timeout_sec=float(raw.get("default_tool_timeout_sec", 120.0)),
             max_output_chars=int(raw.get("max_output_chars", 100_000)),
-            max_read_chars=int(raw.get("max_read_chars", 500_000)),
-            max_search_file_bytes=int(raw.get("max_search_file_bytes", 5 * 1024 * 1024)),
-            max_edit_file_bytes=int(raw.get("max_edit_file_bytes", 20 * 1024 * 1024)),
-            max_background_tasks=int(raw.get("max_background_tasks", 32)),
+            mcp_inventory_ttl_sec=max(1.0, float(raw.get("mcp_inventory_ttl_sec", 300.0))),
+            tool_profile=_as_tool_profile(os.environ.get("CODEXPC_TOOL_PROFILE", raw.get("tool_profile", "core"))),
             log_level=str(raw.get("log_level", "INFO")).upper(),
         )

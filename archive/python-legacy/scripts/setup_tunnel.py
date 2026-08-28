@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Interactive launcher for CodexPC Connector through OpenAI tunnel-client."""
+
 from __future__ import annotations
 
 import argparse
@@ -109,8 +110,18 @@ def main() -> int:
         print(f"Organization: {organization}")
     print(f"Profile: {profile}\nTunnel: {tunnel_id}\nAPI key: system credential store")
 
-    init = [tunnel_client, "init", "--sample", "sample_mcp_stdio_local", "--profile", profile,
-            "--tunnel-id", tunnel_id, "--mcp-command", mcp_command]
+    init = [
+        tunnel_client,
+        "init",
+        "--sample",
+        "sample_mcp_stdio_local",
+        "--profile",
+        profile,
+        "--tunnel-id",
+        tunnel_id,
+        "--mcp-command",
+        mcp_command,
+    ]
     result = subprocess.run(init, env=env, check=False)
     if result.returncode:
         return result.returncode
