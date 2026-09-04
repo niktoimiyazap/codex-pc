@@ -12,6 +12,14 @@
 [![CI](https://img.shields.io/github/actions/workflow/status/niktoimiyazap/codex-mcp-router/test.yml?branch=main&label=tests)](https://github.com/niktoimiyazap/codex-mcp-router/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-22C55E.svg)](LICENSE)
 
+<br>
+
+<img src="assets/screenshots/codex-pc-ui.png" alt="CodexPC local frontend" width="100%">
+
+<br>
+
+<img src="assets/screenshots/codex-pc-ui-start.png" alt="CodexPC first-run setup" width="100%">
+
 </div>
 
 ```text
@@ -172,7 +180,6 @@ codex-mcp-router/
 ├─ frontend/           local setup + activity UI and its loopback server
 ├─ scripts/            install, start, build and supervision internals
 ├─ docs/               architecture, configuration and setup documentation
-├─ archive/            historical implementations and retired launchers
 ├─ install.cmd         first install / repair entry point
 ├─ start.cmd           normal user launcher
 ├─ config.example.toml manual configuration reference

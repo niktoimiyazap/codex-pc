@@ -12,6 +12,14 @@
 [![CI](https://img.shields.io/github/actions/workflow/status/niktoimiyazap/codex-mcp-router/test.yml?branch=main&label=tests)](https://github.com/niktoimiyazap/codex-mcp-router/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-22C55E.svg)](LICENSE)
 
+<br>
+
+<img src="assets/screenshots/codex-pc-ui.png" alt="Локальный интерфейс CodexPC" width="100%">
+
+<br>
+
+<img src="assets/screenshots/codex-pc-ui-start.png" alt="Первичная настройка CodexPC" width="100%">
+
 </div>
 
 ```text
@@ -172,7 +180,6 @@ codex-mcp-router/
 ├─ frontend/           локальный setup/activity UI и loopback server
 ├─ scripts/            установка, запуск, сборка и supervision
 ├─ docs/               архитектура, конфигурация и setup
-├─ archive/            исторические реализации и старые launcher'ы
 ├─ install.cmd         первый запуск / восстановление установки
 ├─ start.cmd           обычный пользовательский запуск
 ├─ config.example.toml справочник ручной конфигурации
