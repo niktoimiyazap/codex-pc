@@ -1,4 +1,12 @@
+param([switch]$NoBrowser)
 $ErrorActionPreference = 'Continue'
+
+$createdNew = $false
+$supervisorMutex = [System.Threading.Mutex]::new($true, 'Local\CodexPCFrontendSupervisor', [ref]$createdNew)
+if (-not $createdNew) {
+    $supervisorMutex.Dispose()
+    exit 0
+}
 
 $repo = Split-Path -Parent $PSScriptRoot
 $monitor = Join-Path $repo 'frontend\server.pyw'
@@ -20,14 +28,21 @@ if (-not $pythonw -or -not (Test-Path -LiteralPath $pythonw -PathType Leaf)) {
 if (-not $pythonw) { throw 'pythonw.exe was not found. Run install.cmd again.' }
 
 $first = $true
-while ($true) {
-    try {
-        $args = @('"' + $monitor + '"')
-        if (-not $first) { $args += '--no-browser' }
-        $first = $false
-        $proc = Start-Process -FilePath $pythonw -ArgumentList $args -WindowStyle Hidden -PassThru
-        Wait-Process -Id $proc.Id
-    } catch {
+try {
+    while ($true) {
+        try {
+            $args = @('"' + $monitor + '"')
+            if ($NoBrowser -or -not $first) { $args += '--no-browser' }
+            $first = $false
+            $proc = Start-Process -FilePath $pythonw -ArgumentList $args -WindowStyle Hidden -PassThru
+            Wait-Process -Id $proc.Id
+            $proc.Refresh()
+            if ($proc.ExitCode -eq 42) { break }
+        } catch {
+        }
+        Start-Sleep -Milliseconds 250
     }
-    Start-Sleep -Milliseconds 250
+} finally {
+    try { $supervisorMutex.ReleaseMutex() } catch {}
+    $supervisorMutex.Dispose()
 }

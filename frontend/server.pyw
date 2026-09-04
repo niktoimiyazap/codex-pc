@@ -1222,11 +1222,13 @@ def already_running() -> bool:
 
 def main() -> None:
     url = f"http://{HOST}:{PORT}/?auth={urllib.parse.quote(FRONTEND_AUTH_TOKEN)}"
+    no_browser = "--no-browser" in sys.argv
     if already_running():
-        webbrowser.open(url)
-        return
+        if not no_browser:
+            webbrowser.open(url)
+        raise SystemExit(42)
     server = ThreadingHTTPServer((HOST, PORT), Handler)
-    if "--no-browser" not in sys.argv:
+    if not no_browser:
         threading.Timer(0.45, lambda: webbrowser.open(url)).start()
     server.serve_forever()
 
