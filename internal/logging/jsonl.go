@@ -7,13 +7,27 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"sync"
+	"sync/atomic"
 	"time"
 )
 
+type logEvent struct {
+	level   string
+	message string
+	data    map[string]any
+	time    time.Time
+}
+
+type streamBatch struct {
+	event logEvent
+	count int
+}
+
 type Logger struct {
-	mu   sync.Mutex
-	path string
+	path        string
+	queue       chan logEvent
+	streamQueue chan logEvent
+	dropped     atomic.Uint64
 }
 
 func New(stateDir string) (*Logger, error) {
@@ -28,30 +42,127 @@ func New(stateDir string) (*Logger, error) {
 		_ = os.Rename(path+".1", path+".2")
 		_ = os.Rename(path, path+".1")
 	}
-	return &Logger{path: path}, nil
+	l := &Logger{path: path, queue: make(chan logEvent, 512), streamQueue: make(chan logEvent, 1536)}
+	go l.run()
+	return l, nil
 }
 
+// Event is deliberately non-blocking. Tool execution and emergency controls must
+// never wait behind disk or stderr I/O. When the bounded queue is full we drop
+// diagnostics rather than applying backpressure to the connector runtime.
 func (l *Logger) Event(level, message string, data map[string]any) {
 	if l == nil {
 		return
 	}
-	now := time.Now()
-	payload := map[string]any{"level": level, "logger": "codexpc", "message": message, "time": now.Format("2006-01-02T15:04:05.000")}
-	if len(data) > 0 {
-		payload["data"] = data
+	e := logEvent{level: level, message: message, data: cloneData(data), time: time.Now()}
+	target := l.queue
+	if message == "chatgpt_tool_call_stream" && l.streamQueue != nil {
+		target = l.streamQueue
+	}
+	select {
+	case target <- e:
+	default:
+		l.dropped.Add(1)
+	}
+}
+
+func cloneData(data map[string]any) map[string]any {
+	if len(data) == 0 {
+		return nil
+	}
+	copy := make(map[string]any, len(data))
+	for k, v := range data {
+		copy[k] = v
+	}
+	return copy
+}
+
+func streamKey(e logEvent) string {
+	if e.message != "chatgpt_tool_call_stream" || len(e.data) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%v|%v|%v", e.data["call_id"], e.data["process_id"], e.data["stream"])
+}
+
+func (l *Logger) run() {
+	file, _ := os.OpenFile(l.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if file != nil {
+		defer file.Close()
+	}
+	ticker := time.NewTicker(125 * time.Millisecond)
+	defer ticker.Stop()
+	pending := make(map[string]*streamBatch)
+	flushStreams := func() {
+		for key, batch := range pending {
+			if batch.count > 1 {
+				batch.event.data["coalesced_chunks"] = batch.count
+			}
+			l.write(file, batch.event)
+			delete(pending, key)
+		}
+	}
+	queueStream := func(e logEvent) {
+		key := streamKey(e)
+		if key == "" {
+			l.write(file, e)
+			return
+		}
+		if batch := pending[key]; batch != nil {
+			batch.count++
+			batch.event.time = e.time
+			if delta, ok := e.data["delta"].(string); ok {
+				current, _ := batch.event.data["delta"].(string)
+				if len(current) < 64*1024 {
+					remaining := 64*1024 - len(current)
+					if len(delta) > remaining {
+						delta = delta[:remaining]
+						batch.event.data["stream_batch_truncated"] = true
+					}
+					batch.event.data["delta"] = current + delta
+				} else {
+					batch.event.data["stream_batch_truncated"] = true
+				}
+			}
+			return
+		}
+		pending[key] = &streamBatch{event: e, count: 1}
+	}
+	for {
+		// Lifecycle/control events always get first chance to drain. A terminal
+		// flood must not push start/yield/finish/error state behind stream noise.
+		select {
+		case e := <-l.queue:
+			l.write(file, e)
+			continue
+		default:
+		}
+		select {
+		case e := <-l.queue:
+			l.write(file, e)
+		case e := <-l.streamQueue:
+			queueStream(e)
+		case <-ticker.C:
+			flushStreams()
+			if dropped := l.dropped.Swap(0); dropped > 0 {
+				l.write(file, logEvent{level: "WARN", message: "logger_events_dropped", time: time.Now(), data: map[string]any{"count": dropped, "reason": "bounded logging queue full"}})
+			}
+		}
+	}
+}
+
+func (l *Logger) write(file *os.File, e logEvent) {
+	payload := map[string]any{"level": e.level, "logger": "codexpc", "message": e.message, "time": e.time.Format("2006-01-02T15:04:05.000")}
+	if len(e.data) > 0 {
+		payload["data"] = e.data
 	}
 	b, err := json.Marshal(payload)
 	if err != nil {
 		return
 	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	f, err := os.OpenFile(l.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
-	if err == nil {
-		_, _ = f.Write(append(b, '\n'))
-		_ = f.Close()
+	if file != nil {
+		_, _ = file.Write(append(b, '\n'))
 	}
-	_, _ = fmt.Fprintf(os.Stderr, "%s[%s] [%s]%s %s%s\x1b[0m\n", color(level, message), now.Format("15:04:05.000"), level, category(message), message, consoleFields(data))
+	_, _ = fmt.Fprintf(os.Stderr, "%s[%s] [%s]%s %s%s\x1b[0m\n", color(e.level, e.message), e.time.Format("15:04:05.000"), e.level, category(e.message), e.message, consoleFields(e.data))
 }
 
 func color(level, message string) string {

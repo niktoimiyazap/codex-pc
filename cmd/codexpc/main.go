@@ -131,13 +131,15 @@ func smokeCommand(ctx context.Context, client *appserver.Client, streams *appser
 	defer unregister()
 
 	params := map[string]any{
-		"command":   []string{"powershell", "-NoProfile", "-Command", "1..3 | ForEach-Object { Write-Output (\"go-step $_\"); Start-Sleep -Milliseconds 300 }"},
-		"processId": processID,
-		"timeoutMs": 10000,
+		"command":            []string{"powershell", "-NoProfile", "-Command", "1..3 | ForEach-Object { Write-Output (\"go-step $_\"); Start-Sleep -Milliseconds 300 }"},
+		"processId":          processID,
+		"streamStdoutStderr": true,
+		"outputBytesCap":     65536,
+		"permissionProfile":  ":danger-full-access",
+		"disableTimeout":     true,
 	}
 	if runtime.GOOS != "windows" {
-		params["streamStdoutStderr"] = true
-		params["outputBytesCap"] = 65536
+		params["command"] = []string{"sh", "-c", "for n in 1 2 3; do echo smoke-step-$n; sleep 0.3; done"}
 	}
 	var result map[string]any
 	reqCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
@@ -163,7 +165,7 @@ func watchRestartRequest(ctx context.Context, stateDir string, logger *logpkg.Lo
 				continue
 			}
 			_ = os.Remove(marker)
-			logger.Event("INFO", "connector_restart_requested", map[string]any{"source": "monitor_ui"})
+			logger.Event("INFO", "connector_restart_requested", map[string]any{"source": "frontend"})
 			requestStop()
 			return
 		}

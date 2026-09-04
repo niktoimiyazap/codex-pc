@@ -6,4 +6,10 @@ max_output_chars = 100000
 mcp_inventory_ttl_sec = 300
 
 tool_profile = "core"
+
+# Non-secret tunnel metadata. The Windows setup UI fills these automatically.
+tunnel_profile = "codex"
+tunnel_id = ""
+organization = ""
+
 log_level = "INFO"

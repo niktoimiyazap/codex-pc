@@ -4,7 +4,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$Root = Split-Path -Parent $MyInvocation.MyCommand.Path
+$Root = Split-Path -Parent $PSScriptRoot
 Set-Location $Root
 
 function Resolve-GoExe {

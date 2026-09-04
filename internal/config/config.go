@@ -17,6 +17,9 @@ type Settings struct {
 	MaxOutputChars           int
 	MCPInventoryTTLSec       float64
 	ToolProfile              string
+	TunnelProfile            string
+	TunnelID                 string
+	Organization             string
 	LogLevel                 string
 }
 
@@ -38,14 +41,14 @@ func Load() (Settings, error) {
 	s := Settings{
 		StateDir: state, Workspace: home, AllowedRoots: []string{home},
 		DefaultStartupTimeoutSec: 45, DefaultToolTimeoutSec: 120, MaxOutputChars: 100000,
-		MCPInventoryTTLSec: 300, ToolProfile: "core", LogLevel: "INFO",
+		MCPInventoryTTLSec: 300, ToolProfile: "core", TunnelProfile: "codex", LogLevel: "INFO",
 	}
 	configPath := filepath.Join(state, "config.toml")
 	if f, err := os.Open(configPath); err == nil {
 		defer f.Close()
 		scanner := bufio.NewScanner(f)
 		for scanner.Scan() {
-			line := strings.TrimSpace(strings.SplitN(scanner.Text(), "#", 2)[0])
+			line := strings.TrimSpace(stripComment(scanner.Text()))
 			if line == "" || strings.HasPrefix(line, "[") {
 				continue
 			}
@@ -77,6 +80,12 @@ func Load() (Settings, error) {
 				}
 			case "tool_profile":
 				s.ToolProfile = strings.ToLower(unquote(val))
+			case "tunnel_profile":
+				s.TunnelProfile = unquote(val)
+			case "tunnel_id":
+				s.TunnelID = unquote(val)
+			case "organization":
+				s.Organization = unquote(val)
 			case "log_level":
 				s.LogLevel = strings.ToUpper(unquote(val))
 			}
@@ -94,9 +103,38 @@ func Load() (Settings, error) {
 	return s, nil
 }
 
+func stripComment(line string) string {
+	quoted := false
+	escaped := false
+	for i, r := range line {
+		if escaped {
+			escaped = false
+			continue
+		}
+		if r == '\\' && quoted {
+			escaped = true
+			continue
+		}
+		if r == '"' {
+			quoted = !quoted
+			continue
+		}
+		if r == '#' && !quoted {
+			return line[:i]
+		}
+	}
+	return line
+}
+
 func unquote(v string) string {
 	v = strings.TrimSpace(v)
-	if len(v) >= 2 && ((v[0] == '"' && v[len(v)-1] == '"') || (v[0] == '\'' && v[len(v)-1] == '\'')) {
+	if len(v) >= 2 && v[0] == '"' && v[len(v)-1] == '"' {
+		if decoded, err := strconv.Unquote(v); err == nil {
+			return decoded
+		}
+		return v[1 : len(v)-1]
+	}
+	if len(v) >= 2 && v[0] == '\'' && v[len(v)-1] == '\'' {
 		return v[1 : len(v)-1]
 	}
 	return v

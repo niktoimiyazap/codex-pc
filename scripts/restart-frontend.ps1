@@ -1,8 +1,24 @@
 $ErrorActionPreference = 'Stop'
 
 $repo = Split-Path -Parent $PSScriptRoot
-$monitor = Join-Path $repo 'monitor_ui\CodexPC Monitor.pyw'
-$pythonw = 'C:\Users\niktoimiya\AppData\Local\Programs\Python\Python313\pythonw.exe'
+$frontend = Join-Path $repo 'frontend\server.pyw'
+
+$pythonw = $env:CODEXPC_PYTHONW_PATH
+if (-not $pythonw) { $pythonw = [Environment]::GetEnvironmentVariable('CODEXPC_PYTHONW_PATH', 'User') }
+if (-not $pythonw -or -not (Test-Path -LiteralPath $pythonw -PathType Leaf)) {
+    $command = Get-Command pythonw.exe -ErrorAction SilentlyContinue
+    if ($command) { $pythonw = $command.Source }
+}
+if (-not $pythonw -or -not (Test-Path -LiteralPath $pythonw -PathType Leaf)) {
+    $known = @(
+        (Join-Path $env:LOCALAPPDATA 'Programs\Python\Python314\pythonw.exe'),
+        (Join-Path $env:LOCALAPPDATA 'Programs\Python\Python313\pythonw.exe'),
+        (Join-Path $env:LOCALAPPDATA 'Programs\Python\Python312\pythonw.exe'),
+        (Join-Path $env:LOCALAPPDATA 'Programs\Python\Python311\pythonw.exe')
+    )
+    $pythonw = $known | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+}
+if (-not $pythonw) { throw 'pythonw.exe was not found. Run install.cmd again.' }
 
 $deadline = (Get-Date).AddSeconds(8)
 do {
@@ -11,5 +27,4 @@ do {
     Start-Sleep -Milliseconds 100
 } while ((Get-Date) -lt $deadline)
 
-$quotedMonitor = '"' + $monitor + '"'
-Start-Process -FilePath $pythonw -ArgumentList @($quotedMonitor, '--no-browser') -WindowStyle Hidden
+Start-Process -FilePath $pythonw -ArgumentList @('"' + $frontend + '"', '--no-browser') -WindowStyle Hidden

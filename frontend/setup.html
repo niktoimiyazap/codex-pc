@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CodexPC Setup</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400..700&display=swap" rel="stylesheet">
+<link href="/setup.css" rel="stylesheet">
+</head>
+<body class="setup-loading">
+<a class="setup-exit" id="setupExit" href="/" hidden><i data-feather="arrow-left"></i><span>CodexPC</span></a>
+<div class="setup-loader" id="setupLoader" aria-label="Loading setup"><span class="setup-spinner"></span></div>
+<main class="setup-page" id="setupPage" hidden>
+  <div class="setup-progress" aria-label="Setup progress">
+    <span class="setup-progress-dot active" data-setup-dot="0"></span>
+    <span class="setup-progress-dot" data-setup-dot="1"></span>
+    <span class="setup-progress-dot" data-setup-dot="2"></span>
+  </div>
+  <form class="setup-form" id="setupForm">
+    <section class="setup-step" data-setup-step="0">
+      <div class="setup-hero">
+        <div class="setup-hero-title">Your PC, connected without the setup circus.</div>
+        <div class="setup-hero-copy">CodexPC stays local and connects to ChatGPT through the OpenAI tunnel runtime. We only need a workspace and your tunnel credentials.</div>
+      </div>
+      <div class="setup-feature-list">
+        <div class="setup-feature"><span class="setup-feature-icon"><i data-feather="zap"></i></span><div><strong>Automatic runtime setup</strong><span>The installer handles Go, the tunnel runtime, the build and frontend dependencies.</span></div></div>
+        <div class="setup-feature"><span class="setup-feature-icon"><i data-feather="lock"></i></span><div><strong>Local credential protection</strong><span>The runtime key is encrypted for your Windows account and stays out of browser storage and plain-text config.</span></div></div>
+        <div class="setup-feature"><span class="setup-feature-icon"><i data-feather="sliders"></i></span><div><strong>One source of truth</strong><span>Your choices update the same CodexPC config the connector uses.</span></div></div>
+      </div>
+    </section>
+
+    <section class="setup-step hidden setup-fields-step" data-setup-step="1">
+      <div class="setup-section-title">Workspace</div>
+      <div class="setup-section-copy">Choose where CodexPC is allowed to work by default.</div>
+      <div class="setup-grid">
+        <label class="setup-field wide"><span class="setup-label">Workspace</span><input class="setup-input mono" id="setupWorkspace" name="workspace" autocomplete="off" required></label>
+        <div class="setup-field wide">
+          <span class="setup-label">Tool profile</span>
+          <div class="setup-combobox" id="setupToolProfileControl">
+            <button class="setup-select-button" id="setupToolProfileButton" type="button" aria-haspopup="listbox" aria-expanded="false">
+              <span id="setupToolProfileDisplay">Core — clean default toolset</span><i data-feather="chevron-down"></i>
+            </button>
+            <div class="setup-select-menu hidden" id="setupToolProfileMenu" role="listbox" tabindex="-1" aria-label="Tool profile">
+              <button class="setup-option selected" type="button" role="option" aria-selected="true" data-value="core" data-label="Core — clean default toolset"><span><strong>Core</strong><small>Clean default toolset</small></span><i data-feather="check"></i></button>
+              <button class="setup-option" type="button" role="option" aria-selected="false" data-value="full" data-label="Full — compatibility tools included"><span><strong>Full</strong><small>Compatibility tools included</small></span><i data-feather="check"></i></button>
+            </div>
+            <input type="hidden" id="setupToolProfile" name="tool_profile" value="core">
+          </div>
+        </div>
+      </div>
+      <div class="setup-help">On first setup, allowed_roots matches this workspace. You can widen it later.</div>
+    </section>
+
+    <section class="setup-step hidden setup-fields-step" data-setup-step="2">
+      <div class="setup-section-title">OpenAI tunnel</div>
+      <div class="setup-section-copy">Use a Tunnel ID and a runtime API key with Tunnels Read + Use.</div>
+      <div class="setup-grid">
+        <label class="setup-field wide"><span class="setup-label">Tunnel ID</span><input class="setup-input mono" id="setupTunnelId" name="tunnel_id" placeholder="tunnel_…" autocomplete="off" spellcheck="false" required pattern="tunnel_[0-9a-f]{32}"></label>
+        <label class="setup-field wide"><span class="setup-label">Runtime API key <span class="setup-label-note" id="setupKeyNote">Required</span></span><input class="setup-input mono" id="setupApiKey" name="api_key" type="password" placeholder="Paste runtime key" autocomplete="new-password" spellcheck="false"></label>
+        <label class="setup-field"><span class="setup-label">Profile</span><input class="setup-input mono" id="setupTunnelProfile" name="tunnel_profile" value="codex" autocomplete="off"></label>
+        <label class="setup-field"><span class="setup-label">Organization label <span class="setup-label-note">optional</span></span><input class="setup-input" id="setupOrganization" name="organization" autocomplete="organization"></label>
+      </div>
+      <div class="setup-secure-note"><i data-feather="shield"></i><span>The API key is encrypted locally with Windows DPAPI. TOML stores only non-secret setup values.</span></div>
+    </section>
+
+    <section class="setup-step hidden" data-setup-step="3">
+      <div class="setup-complete"><div class="setup-complete-icon"><i data-feather="check"></i></div><div class="setup-complete-title">CodexPC is ready.</div><div class="setup-complete-copy" id="setupCompleteText">Configuration saved. The connector can now start through your tunnel profile.</div></div>
+    </section>
+
+    <div class="setup-error" id="setupError" role="alert"></div>
+    <div class="setup-footer">
+      <button class="setup-button ghost" id="setupCancel" type="button">Cancel</button>
+      <button class="setup-button" id="setupBack" type="button">Back</button>
+      <span class="setup-footer-spacer"></span>
+      <button class="setup-button primary" id="setupNext" type="button">Continue</button>
+    </div>
+  </form>
+</main>
+<script src="/vendor/feather.min.js"></script>
+<script src="/setup.js" defer></script>
+</body>
+</html>

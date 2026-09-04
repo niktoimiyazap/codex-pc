@@ -17,6 +17,12 @@ dist/
 .local/
 activity.log
 test.txt
+/codexpc.exe
+/codexpc-*.txt
+/codexpc_*.txt
+/progress_ui_test*.txt
+/.agents/
+/archive/legacy-binaries/**/*.exe
 .env
 .env.*
 !.env.example

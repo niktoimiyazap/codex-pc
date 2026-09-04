@@ -1,167 +1,214 @@
-# CodexPC Connector
+<div align="center">
 
-[English](README.md) | [Русский](README.ru.md)
+# CodexPC
 
-> A thin MCP stdio adapter over the original Codex app-server, with downstream MCP routing and native Windows desktop control.
+**A local control plane that lets ChatGPT work on your Windows PC through MCP — without turning your machine into a pile of shell scripts.**
 
-[![Go 1.26+](https://img.shields.io/badge/Go-1.26%2B-00ADD8?logo=go&logoColor=white)](https://go.dev/)
+[Русский](README.ru.md) · [Setup](docs/TUNNEL_SETUP.md) · [Architecture](docs/ARCHITECTURE.md) · [Security](SECURITY.md)
+
+[![Windows](https://img.shields.io/badge/Windows-first-0078D4?logo=windows11&logoColor=white)](#quick-start)
+[![Go 1.26](https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&logoColor=white)](go.mod)
 [![MCP](https://img.shields.io/badge/Protocol-MCP-111827)](https://modelcontextprotocol.io/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-22C55E.svg)](LICENSE)
 [![CI](https://img.shields.io/github/actions/workflow/status/niktoimiyazap/codex-mcp-router/test.yml?branch=main&label=tests)](https://github.com/niktoimiyazap/codex-mcp-router/actions)
+[![License: MIT](https://img.shields.io/badge/License-MIT-22C55E.svg)](LICENSE)
 
-## What it does
-
-CodexPC Connector exposes a controlled local tool layer to MCP clients:
-
-- guarded filesystem reads and mutations;
-- atomic UTF-8 writes with conflict protection;
-- synchronous and background process execution;
-- timeouts, cancellation, bounded output, and process-tree termination;
-- downstream MCP inventory, search, and calls through Codex app-server;
-- secret-redacted structured logs and single-instance protection.
-
-## Architecture
+</div>
 
 ```text
-MCP client
-    |
-    v
-CodexPC Connector
-    |-- filesystem policy and UTF-8 validation
-    |-- managed local process jobs
-    `-- JSON-RPC / JSONL client
-             |
-             v
-       codex app-server
-         |-- fs/*
-         |-- mcpServerStatus/list
-         `-- mcpServer/tool/call
+                 OpenAI Tunnel
+ChatGPT  ─────────────────────────►  CodexPC
+                                        │
+                 ┌──────────────────────┼──────────────────────┐
+                 │                      │                      │
+                 ▼                      ▼                      ▼
+          Codex app-server       Native Windows          Local frontend
+          files · MCP · rules    commands · desktop      sessions · setup
 ```
 
-The connector starts one long-lived `codex app-server --stdio` process and creates one ephemeral Codex thread for MCP discovery and calls.
+CodexPC is a local MCP bridge built around the original Codex app-server. It gives ChatGPT a structured way to inspect projects, edit files, run real development workflows, control the Windows desktop, call other MCP servers, keep long-running commands alive, and ask for human approval when sensitive credentials are involved.
 
-## Requirements
+The important part: **the model gets tools, not a giant unrestricted shell prompt.**
 
-- Go 1.26 or newer (only required to build from source);
-- Codex CLI with `codex app-server` support;
-- an authenticated Codex installation;
-- MCP servers configured through Codex when downstream routing is needed.
+## Why CodexPC
+
+| | |
+| --- | --- |
+| **One install** | `install.cmd` prepares the required Go toolchain, Python frontend runtime, Codex CLI, official `tunnel-client`, dependencies, build and smoke test. |
+| **Real Codex underneath** | Filesystem operations, rules and downstream MCP integrations reuse the original Codex app-server instead of reimplementing everything badly. |
+| **Long-running work actually works** | Native Windows command sessions can continue past one MCP request and can be polled, written to or terminated later. |
+| **Human-in-the-loop secrets** | Credentials stay in the local vault. Sensitive command injection and direct secret inspection require explicit approval. |
+| **Useful local UI** | Named chat sessions, tool activity, history, background processes, approvals, errors, secrets and setup live in one local frontend. |
+| **Windows-native control** | Screenshots, mouse, keyboard and scrolling are first-class tools rather than shell hacks. |
 
 ## Quick start
 
-```bash
+### 1. Download CodexPC
+
+Clone the repository or download it as a ZIP:
+
+```powershell
 git clone https://github.com/niktoimiyazap/codex-mcp-router.git
 cd codex-mcp-router
-go build -o dist/codexpc-go.exe ./cmd/codexpc
 ```
 
-Windows recommended build and run:
+### 2. Run the installer
+
+Double-click `install.cmd`, or run:
 
 ```bat
-build-go.cmd
-wrapper.cmd
+install.cmd
 ```
 
-`build-go.cmd` runs formatting, tests, build, a smoke test, deploys `dist\codexpc-go.exe`, and copies the binary to the Desktop when possible.
+The installer is idempotent: if a dependency is already installed and compatible, CodexPC reuses it instead of reinstalling it.
 
-The former Python runtime is preserved only under `archive/python-legacy/` for historical reference and regression comparison.
+It prepares:
 
-## Interactive tunnel launcher
+- the Go version required by `go.mod`;
+- Python for the local frontend;
+- Codex CLI and its login state;
+- the official OpenAI `tunnel-client`;
+- Go modules, tests, the production build and smoke verification.
 
-Connect this local MCP server to an existing OpenAI tunnel without placing API keys in files:
+### 3. Finish setup in the local UI
+
+After installation, CodexPC opens its local setup page. Choose:
+
+- your default workspace;
+- `core` or `full` tool profile;
+- your OpenAI Tunnel ID;
+- a runtime API key with the required tunnel permissions;
+- optional tunnel profile / organization labels.
+
+Non-secret values are written to the normal CodexPC config. The runtime key is encrypted for the current Windows account with **DPAPI** and is never stored in TOML or browser LocalStorage.
+
+Before saving a new tunnel configuration, CodexPC validates it in an isolated temporary profile with `tunnel-client doctor`. A bad key or Tunnel ID does not overwrite a working setup.
+
+### 4. Daily launch
+
+After first setup, use:
 
 ```bat
-launch-tunnel.cmd
+start.cmd
 ```
 
-```bash
-chmod +x launch-tunnel.sh
-./launch-tunnel.sh
+The launcher shows the short CodexPC terminal intro, starts the local frontend, restores the configured runtime and keeps the tunnel supervised.
+
+## What ChatGPT gets
+
+CodexPC intentionally exposes purpose-built tools instead of one monolithic command interface.
+
+| Area | Examples |
+| --- | --- |
+| **Sessions & project rules** | `session_create`, `session_list`, `read_rules` |
+| **Filesystem** | `fs_read_file`, `fs_edit_file`, `fs_write_file`, `fs_search`, `fs_copy`, `fs_remove` |
+| **Terminal** | `command_inspect`, `command_exec`, `shell_exec`, `command_poll`, `command_write`, `command_terminate` |
+| **Desktop** | `computer` — screenshots, mouse, keyboard, scrolling |
+| **MCP routing** | `mcp_discover`, `mcp_call`, `mcp_resource_read`, `mcp_reload`, `mcp_oauth_login` |
+| **Secrets** | `secret_vault`, approval-gated `credential_value`, credential references for commands |
+| **Control plane** | `connector_status`, emergency process control, `multi_tool` batching |
+
+The default `core` profile keeps the surface focused. `full` exposes additional compatibility and diagnostic tools.
+
+## How it works
+
+```text
+start.cmd
+   │
+   └─ scripts/start-codexpc.ps1
+          ├─ frontend/server.pyw ───────► http://127.0.0.1:8765
+          └─ tunnel-client
+                 │ MCP over stdio
+                 ▼
+           dist/codexpc-go.exe
+                 │
+                 ├─ Codex app-server ───► fs / rules / configured MCP servers
+                 ├─ native command supervisor
+                 ├─ Windows desktop control
+                 └─ structured local state + logs
 ```
 
-The launcher asks for the tunnel details once and stores the runtime API key in Windows Credential Manager or macOS Keychain. Later launches reuse it automatically. See [Interactive tunnel setup](docs/TUNNEL_SETUP.md).
+CodexPC keeps one long-lived Codex app-server connection and layers session ownership, path policy, MCP inventory caching, response normalization, process supervision, approvals and the local frontend around it.
+
+For the full boundary and request flow, see [Architecture](docs/ARCHITECTURE.md).
+
+## Security model
+
+CodexPC is privileged local software, so the design assumes **one trusted Windows user** and keeps the trust boundary local.
+
+- The frontend binds to loopback (`127.0.0.1`) and uses a local auth bootstrap cookie.
+- Filesystem paths are checked against configured `allowed_roots` before privileged operations.
+- The tunnel runtime key is protected with Windows DPAPI.
+- Secret values are represented by opaque credential references whenever possible.
+- Sensitive credential use can require explicit approval in the frontend.
+- Logs and returned metadata are redacted and bounded.
+- Tunnel configuration is validated before it replaces the active setup.
+
+Do not expose the connector or its local frontend directly to a public network. Read [SECURITY.md](SECURITY.md) before extending the trust boundary.
 
 ## Configuration
 
-Copy `config.example.toml` to the platform state directory:
+The preferred configuration path is the setup UI. The generated per-user state lives by default at:
 
-| Platform | Configuration path |
-|---|---|
-| Windows | `%LOCALAPPDATA%\CodexPCConnector\config.toml` |
-| macOS | `~/Library/Application Support/CodexPCConnector/config.toml` |
-| Linux | `$XDG_STATE_HOME/codexpc-connector/config.toml` |
+```text
+%LOCALAPPDATA%\CodexPCConnector
+```
 
-Minimal example:
+The non-secret configuration is stored in `config.toml`. A minimal manual example is available in [`config.example.toml`](config.example.toml):
 
 ```toml
-workspace = "~/projects"
-allowed_roots = ["~/projects"]
-
+workspace = "C:/Users/you/projects"
+allowed_roots = ["C:/Users/you/projects"]
 tool_profile = "core"
 ```
 
-The connector is intentionally thin. Filesystem and terminal operations are delegated to the original Codex app-server. The connector keeps path-policy checks, MCP routing, response normalization, and native Windows desktop control.
+Set `CODEXPC_STATE_DIR` if you need to move the whole state directory. See [Configuration](docs/CONFIGURATION.md) for the supported keys and launcher overrides.
 
-See [Configuration](docs/CONFIGURATION.md) for all options.
+## Repository layout
 
-## Tool groups
+```text
+codex-mcp-router/
+├─ cmd/codexpc/        Go entry point
+├─ internal/           connector core, app-server client, MCP, security, Windows control
+├─ frontend/           local setup + activity UI and its loopback server
+├─ scripts/            install, start, build and supervision internals
+├─ docs/               architecture, configuration and setup documentation
+├─ archive/            historical implementations and retired launchers
+├─ install.cmd         first install / repair entry point
+├─ start.cmd           normal user launcher
+├─ config.example.toml manual configuration reference
+└─ go.mod
+```
 
-### Filesystem
+`dist/` and `.local/` are generated runtime/build directories and are intentionally ignored by Git.
 
-`fs_read_file`, `fs_write_file`, `fs_read_directory`, `fs_create_directory`, `fs_copy`, `fs_remove`
+## Building from source
 
-These tools are validated adapters over the original Codex `fs/*` methods. The connector no longer contains a patch engine, file snapshot cache, project walker, or direct filesystem implementation.
+For development on Windows:
 
-### Terminal
+```bat
+scripts\build.cmd -NoDesktopCopy
+```
 
-`command_exec`
+The build pipeline runs formatting, `go test ./...`, a production build, the real app-server smoke test and staged deployment into `dist/`.
 
-Commands are passed as argv vectors to the original Codex `command/exec` method. The connector no longer owns subprocesses or a background job manager.
+Or run the Go steps manually:
 
-### Desktop control
-
-`computer`
-
-Native Windows screenshot, mouse, keyboard, and scrolling support remains local.
-
-### MCP routing
-
-`mcp_discover`, `mcp_call`
-
-`mcp_discover` lists or searches configured MCP servers and tools from one shared persistent inventory cache. Stale data is returned immediately while a background refresh updates it. The `full` profile additionally exposes `mcp_list_servers`, `mcp_list_tools`, and `mcp_search_tools` as compatibility aliases.
-
-### Connector control
-
-`connector_status`, `list_active_tool_calls`, `cancel_tool_calls`
-
-## Verification
-
-```bash
+```powershell
 go fmt ./cmd/... ./internal/...
 go test ./...
 go build -trimpath -o dist/codexpc-go.exe ./cmd/codexpc
 ```
 
-On Windows the complete verification pipeline is:
-
-```bat
-build-go.cmd
-```
-
 ## Documentation
 
+- [Documentation index](docs/README.md)
 - [Architecture](docs/ARCHITECTURE.md)
 - [Configuration](docs/CONFIGURATION.md)
-- [Interactive tunnel setup](docs/TUNNEL_SETUP.md)
+- [First-run & tunnel setup](docs/TUNNEL_SETUP.md)
 - [Security policy](SECURITY.md)
 - [Contributing](CONTRIBUTING.md)
-- [Release process](docs/RELEASING.md)
 - [Changelog](CHANGELOG.md)
-
-## Security
-
-This is privileged local software intended for a single trusted user over MCP stdio. Do not expose it directly to a public network. Review [SECURITY.md](SECURITY.md) before enabling process or shell execution.
 
 ## License
 
-MIT
+CodexPC is released under the [MIT License](LICENSE).

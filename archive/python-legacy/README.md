@@ -11,6 +11,6 @@ Archived here:
 - legacy entrypoints/wrappers
 - Python-only smoke/benchmark/setup helpers
 
-The active connector runtime lives in the repository root under `cmd/` and `internal/` and is built with `build-go.cmd`.
+The active connector runtime lives under `cmd/` and `internal/` and is built with `scripts/build.cmd`.
 
 Do not add new production changes to this archived implementation. If a historical behavior is needed, port it to Go instead.

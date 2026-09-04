@@ -2,9 +2,11 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -31,6 +33,42 @@ func TestCommandProcessIDsAreUniqueConcurrently(t *testing.T) {
 			t.Fatalf("duplicate process id: %s", id)
 		}
 		seen[id] = struct{}{}
+	}
+}
+
+func TestMCPNotificationsDriveLifecycleAndCancellation(t *testing.T) {
+	s := &Server{inFlight: make(map[string]*inFlightRequest)}
+	s.handleNotification("notifications/initialized", json.RawMessage(`{}`))
+	s.protocolMu.Lock()
+	initialized := s.initialized
+	s.protocolMu.Unlock()
+	if !initialized {
+		t.Fatal("notifications/initialized must advance the MCP lifecycle")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	key := requestIDKey(json.RawMessage(`"request-1"`))
+	s.inFlight[key] = &inFlightRequest{method: "tools/call", cancel: cancel}
+	s.handleNotification("notifications/cancelled", json.RawMessage(`{"requestId":"request-1","reason":"user cancelled"}`))
+	select {
+	case <-ctx.Done():
+	default:
+		t.Fatal("notifications/cancelled must cancel the matching in-flight request")
+	}
+}
+
+func TestMCPCancellationDoesNotCancelInitialize(t *testing.T) {
+	s := &Server{inFlight: make(map[string]*inFlightRequest)}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	key := requestIDKey(json.RawMessage(`7`))
+	s.inFlight[key] = &inFlightRequest{method: "initialize", cancel: cancel}
+	s.handleNotification("notifications/cancelled", json.RawMessage(`{"requestId":7}`))
+	select {
+	case <-ctx.Done():
+		t.Fatal("initialize must not be cancelled by MCP cancellation notifications")
+	default:
 	}
 }
 
@@ -210,6 +248,14 @@ func TestNormalizePowerShellCommandPropagatesFailures(t *testing.T) {
 	}
 }
 
+func TestNormalizePowerShellCommandPreservesSplitCommandArguments(t *testing.T) {
+	input := []string{"powershell.exe", "-NoProfile", "-Command", "Write-Output", "'ARG ONE'", ";", "Write-Output", "'ARG TWO'"}
+	got := normalizePowerShellCommand(input)
+	if !slices.Equal(got, input) {
+		t.Fatalf("split PowerShell command must remain unchanged: got %#v want %#v", got, input)
+	}
+}
+
 func TestWindowsCommandToolSurface(t *testing.T) {
 	listed := tools()
 	byName := make(map[string]Tool, len(listed))
@@ -329,16 +375,18 @@ func TestFSSearchSkipsVirtualEnvironments(t *testing.T) {
 
 func TestMCPToolSurface(t *testing.T) {
 	want := map[string]bool{
-		"session_create":    false,
-		"session_list":      false,
-		"read_rules":        false,
-		"fs_search":         false,
-		"command_inspect":   false,
-		"mcp_discover":      false,
-		"mcp_call":          false,
-		"mcp_resource_read": false,
-		"mcp_reload":        false,
-		"mcp_oauth_login":   false,
+		"session_create":              false,
+		"session_list":                false,
+		"read_rules":                  false,
+		"fs_search":                   false,
+		"command_inspect":             false,
+		"command_list":                false,
+		"command_emergency_terminate": false,
+		"mcp_discover":                false,
+		"mcp_call":                    false,
+		"mcp_resource_read":           false,
+		"mcp_reload":                  false,
+		"mcp_oauth_login":             false,
 	}
 	for _, tool := range tools() {
 		if _, ok := want[tool.Name]; ok {
@@ -359,6 +407,12 @@ func TestMCPToolSurface(t *testing.T) {
 	}
 	if !toolAnnotations("command_inspect")["readOnlyHint"].(bool) {
 		t.Fatal("command_inspect must be annotated read-only")
+	}
+	if !toolAnnotations("command_list")["readOnlyHint"].(bool) {
+		t.Fatal("command_list must be annotated read-only")
+	}
+	if !toolAnnotations("command_emergency_terminate")["idempotentHint"].(bool) {
+		t.Fatal("command_emergency_terminate must be annotated idempotent")
 	}
 	if !toolAnnotations("command_inspect")["openWorldHint"].(bool) {
 		t.Fatal("command_inspect must be annotated open-world because read-only SSH/network inspection crosses the local trust boundary")
@@ -403,7 +457,7 @@ func TestSessionSchemaIsRequiredForWorkingTools(t *testing.T) {
 			t.Fatalf("%s must require session_id: %#v", name, required)
 		}
 	}
-	for _, name := range []string{"connector_status", "session_create", "session_list"} {
+	for _, name := range []string{"connector_status", "session_create", "session_list", "command_list", "command_emergency_terminate"} {
 		tool := byName[name]
 		props, _ := tool.InputSchema["properties"].(map[string]any)
 		if _, ok := props["session_id"]; ok {

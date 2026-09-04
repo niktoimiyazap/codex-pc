@@ -29,6 +29,7 @@ import (
 )
 
 const ProtocolVersion = "2025-06-18"
+const maxCommandProcesses uint32 = 128
 
 var commandProcessSequence uint64
 
@@ -42,6 +43,10 @@ type Server struct {
 	in                  *bufio.Scanner
 	out                 io.Writer
 	writeMu             sync.Mutex
+	requestMu           sync.Mutex
+	inFlight            map[string]*inFlightRequest
+	protocolMu          sync.Mutex
+	initialized         bool
 	threadMu            sync.Mutex
 	threadID            string
 	started             time.Time
@@ -62,6 +67,11 @@ type Server struct {
 	backendOnce         sync.Once
 }
 
+type inFlightRequest struct {
+	method string
+	cancel context.CancelFunc
+}
+
 type chatSession struct {
 	ID        string `json:"id"`
 	Name      string `json:"name"`
@@ -70,32 +80,34 @@ type chatSession struct {
 }
 
 type commandSession struct {
-	mu             sync.Mutex
-	processID      string
-	callID         string
-	chatSessionID  string
-	stdout         bytes.Buffer
-	stderr         bytes.Buffer
-	stdoutRead     int
-	stderrRead     int
-	capReached     bool
-	yielded        bool
-	started        time.Time
-	lastOutput     time.Time
-	outputBytes    int64
-	outputCap      int64
-	done           chan struct{}
-	result         map[string]any
-	err            error
-	timedOut       bool
-	timeoutMs      int64
-	unregister     func()
-	local          bool
-	cmd            *exec.Cmd
-	stdin          io.WriteCloser
-	approvalState  string
-	approvalID     string
-	approvalReason string
+	mu               sync.Mutex
+	processID        string
+	callID           string
+	chatSessionID    string
+	stdout           bytes.Buffer
+	stderr           bytes.Buffer
+	stdoutRead       int
+	stderrRead       int
+	capReached       bool
+	yielded          bool
+	started          time.Time
+	lastOutput       time.Time
+	outputBytes      int64
+	outputCap        int64
+	done             chan struct{}
+	result           map[string]any
+	err              error
+	timedOut         bool
+	timeoutMs        int64
+	unregister       func()
+	local            bool
+	cmd              *exec.Cmd
+	processGroup     uintptr
+	supervisorReason string
+	stdin            io.WriteCloser
+	approvalState    string
+	approvalID       string
+	approvalReason   string
 }
 
 type commandSessionWriter struct {
@@ -190,6 +202,7 @@ func toolAnnotations(name string) map[string]any {
 		"fs_search":         true,
 		"command_inspect":   true,
 		"command_poll":      true,
+		"command_list":      true,
 		"secret_vault":      true,
 		"credential_value":  true,
 		"mcp_discover":      true,
@@ -204,10 +217,11 @@ func toolAnnotations(name string) map[string]any {
 		"multi_tool": true,
 	}
 	idempotent := map[string]bool{
-		"fs_create_directory": true,
-		"command_resize":      true,
-		"command_terminate":   true,
-		"mcp_reload":          true,
+		"fs_create_directory":         true,
+		"command_resize":              true,
+		"command_terminate":           true,
+		"command_emergency_terminate": true,
+		"mcp_reload":                  true,
 	}
 	openWorld := map[string]bool{
 		// These can cross the local-machine trust boundary depending on arguments.
@@ -245,7 +259,7 @@ func NewServer(app *appserver.Client, streams *appserver.StreamRegistry, logger 
 	for i := range roots {
 		roots[i], _ = filepath.Abs(roots[i])
 	}
-	srv := &Server{app: app, streams: streams, in: s, out: output, started: time.Now(), workspace: workspace, allowedRoots: roots, logger: logger, commands: make(map[string]*commandSession), sessions: make(map[string]chatSession), backendReady: make(chan struct{})}
+	srv := &Server{app: app, streams: streams, in: s, out: output, started: time.Now(), workspace: workspace, allowedRoots: roots, logger: logger, inFlight: make(map[string]*inFlightRequest), commands: make(map[string]*commandSession), sessions: make(map[string]chatSession), backendReady: make(chan struct{})}
 	srv.loadInventoryCache()
 	srv.loadSessions()
 	return srv
@@ -514,7 +528,7 @@ func (s *Server) saveInventoryCache(servers []any) {
 	}
 }
 
-func (s *Server) cachedInventory() ([]any, time.Time, bool) {
+func (s *Server) cachedInventory(serverName string) ([]any, time.Time, bool) {
 	s.inventoryMu.Lock()
 	defer s.inventoryMu.Unlock()
 	if len(s.inventory) == 0 {
@@ -525,11 +539,55 @@ func (s *Server) cachedInventory() ([]any, time.Time, bool) {
 		if server == nil {
 			continue
 		}
-		if _, ok := server["tools"]; ok {
-			return s.inventory, s.inventoryAt, true
+		if serverName != "" && stringValue(server["name"]) != serverName {
+			continue
 		}
+		tools, ok := server["tools"].([]any)
+		if !ok {
+			continue
+		}
+		// A failed probe with an empty tool list is not a valid inventory entry.
+		// Treat it as a cache miss so a server-specific discover retries instead
+		// of permanently teaching the model that the MCP exposes zero tools.
+		if stringValue(server["inventory_error"]) != "" && len(tools) == 0 {
+			continue
+		}
+		return s.inventory, s.inventoryAt, true
 	}
 	return nil, time.Time{}, false
+}
+
+func cloneInventoryTools(tools []any) []any {
+	cloned := make([]any, 0, len(tools))
+	for _, item := range tools {
+		tool, _ := item.(map[string]any)
+		if tool == nil {
+			cloned = append(cloned, item)
+			continue
+		}
+		copyTool := make(map[string]any, len(tool))
+		for key, value := range tool {
+			copyTool[key] = value
+		}
+		cloned = append(cloned, copyTool)
+	}
+	return cloned
+}
+
+func inventoryHasStaleServer(cached []any, serverName string) bool {
+	for _, item := range cached {
+		server, _ := item.(map[string]any)
+		if server == nil {
+			continue
+		}
+		if serverName != "" && stringValue(server["name"]) != serverName {
+			continue
+		}
+		if boolValue(server["inventory_stale"], false) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) refreshInventoryInBackground() {
@@ -548,6 +606,79 @@ func (s *Server) refreshInventoryInBackground() {
 		}()
 		_, _ = s.discover(context.Background(), map[string]any{"refresh": true, "_force_inventory_refresh": true})
 	}()
+}
+
+func requestIDKey(raw json.RawMessage) string {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
+		return ""
+	}
+	var text string
+	if err := json.Unmarshal(trimmed, &text); err == nil {
+		return "s:" + text
+	}
+	dec := json.NewDecoder(bytes.NewReader(trimmed))
+	dec.UseNumber()
+	var value any
+	if err := dec.Decode(&value); err == nil {
+		switch v := value.(type) {
+		case json.Number:
+			return "n:" + v.String()
+		case nil:
+			return "null"
+		}
+	}
+	return string(trimmed)
+}
+
+func (s *Server) finishRequest(key string, request *inFlightRequest) {
+	if key == "" || request == nil {
+		return
+	}
+	s.requestMu.Lock()
+	if current := s.inFlight[key]; current == request {
+		delete(s.inFlight, key)
+	}
+	s.requestMu.Unlock()
+}
+
+func (s *Server) handleNotification(method string, raw json.RawMessage) {
+	switch method {
+	case "notifications/initialized":
+		s.protocolMu.Lock()
+		first := !s.initialized
+		s.initialized = true
+		s.protocolMu.Unlock()
+		if first && s.logger != nil {
+			s.logger.Event("INFO", "mcp_client_initialized", map[string]any{"protocol_version": ProtocolVersion})
+		}
+	case "notifications/cancelled":
+		var params struct {
+			RequestID json.RawMessage `json:"requestId"`
+			Reason    string          `json:"reason,omitempty"`
+		}
+		if err := json.Unmarshal(raw, &params); err != nil || len(params.RequestID) == 0 {
+			return
+		}
+		key := requestIDKey(params.RequestID)
+		s.requestMu.Lock()
+		request := s.inFlight[key]
+		if request == nil || request.method == "initialize" {
+			s.requestMu.Unlock()
+			return
+		}
+		cancel := request.cancel
+		requestMethod := request.method
+		s.requestMu.Unlock()
+		cancel()
+		if s.logger != nil {
+			s.logger.Event("INFO", "mcp_request_cancelled", map[string]any{
+				"request_id": strings.TrimSpace(string(params.RequestID)),
+				"method":     requestMethod,
+				"reason":     params.Reason,
+			})
+		}
+	}
 }
 
 func (s *Server) Serve(ctx context.Context) error {
@@ -569,16 +700,36 @@ func (s *Server) Serve(ctx context.Context) error {
 			continue
 		}
 		if len(msg.ID) == 0 {
+			s.handleNotification(msg.Method, msg.Params)
 			continue
 		}
 
 		// MCP requests must not block the stdio reader. A long-running tools/call
 		// used to prevent initialize/ping from being read at all, which made the
 		// tunnel time out and tear down the pipe. Handle each request independently
-		// while serializing only response writes through writeMu.
+		// while serializing only response writes through writeMu. Keep a cancellable
+		// context per request so notifications/cancelled can stop the actual work.
 		request := msg
+		requestCtx, requestCancel := context.WithCancel(serveCtx)
+		requestKey := requestIDKey(request.ID)
+		tracked := &inFlightRequest{method: request.Method, cancel: requestCancel}
+		if requestKey != "" {
+			s.requestMu.Lock()
+			if s.inFlight == nil {
+				s.inFlight = make(map[string]*inFlightRequest)
+			}
+			s.inFlight[requestKey] = tracked
+			s.requestMu.Unlock()
+		}
 		go func() {
-			result, err := s.handle(serveCtx, request.Method, request.Params)
+			defer requestCancel()
+			defer s.finishRequest(requestKey, tracked)
+			result, err := s.handle(requestCtx, request.Method, request.Params)
+			// MCP cancellation means the result is no longer wanted. Do not emit a
+			// late response after the client has explicitly cancelled the request.
+			if requestCtx.Err() != nil {
+				return
+			}
 			resp := rpcResponse{JSONRPC: "2.0", ID: request.ID}
 			if err != nil {
 				resp.Error = &rpcError{Code: -32000, Message: err.Error()}
@@ -607,7 +758,7 @@ func objSchema(props map[string]any, required ...string) map[string]any {
 
 func toolRequiresSession(name string) bool {
 	switch name {
-	case "connector_status", "session_create", "session_list":
+	case "connector_status", "session_create", "session_list", "command_list", "command_emergency_terminate":
 		return false
 	default:
 		return true
@@ -670,7 +821,9 @@ func tools() []Tool {
 		{"command_poll", "Read-only poll for a command_exec session, including sessions waiting for frontend approval. Returns only new stdout/stderr plus current status. If status is still awaiting_approval, do not end the assistant response: call wait and command_poll again in the same turn. If approval resolves, continue the original task automatically. This tool never writes to stdin or changes the process.", objSchema(map[string]any{"process_id": map[string]any{"type": "string"}, "yield_time_ms": map[string]any{"type": "integer", "minimum": 0, "maximum": 10000, "default": 250}}, "process_id")},
 		{"command_write", "Writes explicit stdin data to an existing interactive command_exec session. Use command_poll when no input needs to be sent. Set append_newline to send Enter after input, or close_stdin to close stdin.", objSchema(map[string]any{"process_id": map[string]any{"type": "string"}, "input": map[string]any{"type": "string"}, "append_newline": map[string]any{"type": "boolean", "default": false}, "close_stdin": map[string]any{"type": "boolean", "default": false}}, "process_id")},
 		{"command_resize", "Resizes a running PTY-backed command_exec terminal.", objSchema(map[string]any{"process_id": map[string]any{"type": "string"}, "rows": map[string]any{"type": "integer", "minimum": 1, "maximum": 1000}, "cols": map[string]any{"type": "integer", "minimum": 1, "maximum": 1000}}, "process_id", "rows", "cols")},
-		{"command_terminate", "Terminates a running command_exec session and returns its latest output/status.", objSchema(map[string]any{"process_id": map[string]any{"type": "string"}}, "process_id")},
+		{"command_terminate", "Terminates a running command_exec session owned by the current chat and returns its latest output/status.", objSchema(map[string]any{"process_id": map[string]any{"type": "string"}}, "process_id")},
+		{"command_list", "Emergency control-plane tool. Lists connector-managed terminal processes across all chats so a stuck session cannot hide the process that caused it. Does not require a chat session.", objSchema(map[string]any{})},
+		{"command_emergency_terminate", "Emergency control-plane tool. Terminates a connector-managed process regardless of chat ownership. On Windows native commands this kills the OS process tree directly and does not depend on the Codex app-server being responsive. Does not require a chat session.", objSchema(map[string]any{"process_id": map[string]any{"type": "string"}}, "process_id")},
 		{"computer", "Controls Windows desktop: screenshot, screen_info, move, click, scroll, type, keypress.", objSchema(map[string]any{"action": map[string]any{"type": "string", "enum": []string{"screenshot", "screen_info", "move", "click", "scroll", "type", "keypress"}}, "x": map[string]any{"type": "integer"}, "y": map[string]any{"type": "integer"}, "duration_ms": map[string]any{"type": "integer"}, "button": map[string]any{"type": "string"}, "clicks": map[string]any{"type": "integer"}, "delta_x": map[string]any{"type": "integer"}, "delta_y": map[string]any{"type": "integer"}, "text": map[string]any{"type": "string"}, "interval_ms": map[string]any{"type": "integer"}, "keys": map[string]any{}}, "action")},
 		{"mcp_discover", "Lists configured MCP servers quickly. When server_name is provided, it automatically returns that server's complete tool inventory. Use refresh=true to enumerate complete tools for all matching servers. Tool lists are never truncated by limit; pagination is followed until the MCP server reports no next cursor. Sensitive env/header values are never returned.", objSchema(map[string]any{"query": map[string]any{"type": "string", "default": ""}, "server_name": map[string]any{"type": "string"}, "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 500, "default": 50, "description": "Compatibility field for server/app result sizing; it never truncates MCP tools."}, "refresh": map[string]any{"type": "boolean", "default": false, "description": "Enumerate complete tool inventories for all matching MCP servers. A specific server_name enables this automatically."}})},
 		{"mcp_call", "Calls a configured MCP tool through original Codex app-server mcpServer/tool/call.", objSchema(map[string]any{"server_name": map[string]any{"type": "string"}, "tool_name": map[string]any{"type": "string"}, "arguments": map[string]any{"type": "object", "additionalProperties": true}, "meta": map[string]any{"type": "object", "additionalProperties": true}}, "server_name", "tool_name")},
@@ -1634,6 +1787,14 @@ func normalizePowerShellCommand(cmd []string) []string {
 		if flag != "-command" && flag != "-c" {
 			continue
 		}
+		// PowerShell treats every argv element after -Command as part of the
+		// command invocation. Wrapping only cmd[i+1] while leaving later elements
+		// outside the wrapper changes the command and breaks split pipelines,
+		// statements and arguments. shell_exec always supplies one script element,
+		// so keep the failure-propagation wrapper only for that lossless shape.
+		if i+2 != len(cmd) {
+			return cmd
+		}
 		script := cmd[i+1]
 		wrapped := `$global:LASTEXITCODE = 0; $ErrorActionPreference = 'Stop'; try { & { ` + script + ` }; $__codexOk = $?; $__codexExit = $global:LASTEXITCODE; if ($__codexExit -ne 0) { exit $__codexExit }; if (-not $__codexOk) { exit 1 } } catch { [Console]::Error.WriteLine($_.ToString()); exit 1 }`
 		out := append([]string(nil), cmd...)
@@ -1814,6 +1975,14 @@ func (s *Server) commandWindowsBuffered(ctx context.Context, args map[string]any
 		}
 		return nil, err
 	}
+	if group, err := attachProcessGroup(command.Process.Pid, maxCommandProcesses); err == nil {
+		session.mu.Lock()
+		session.processGroup = group
+		session.mu.Unlock()
+		s.startCommandSupervisor(session)
+	} else if s.logger != nil {
+		s.logger.Event("WARN", "command_process_group_unavailable", map[string]any{"tool": "command_exec", "call_id": callID, "process_id": pid, "pid": command.Process.Pid, "error": err.Error()})
+	}
 
 	s.commandsMu.Lock()
 	s.commands[pid] = session
@@ -1828,6 +1997,10 @@ func (s *Server) commandWindowsBuffered(ctx context.Context, args map[string]any
 		err := command.Wait()
 		encodingErr := validateAndRestoreTextTargets(writeSnapshots)
 		session.mu.Lock()
+		if session.processGroup != 0 {
+			closeProcessGroup(session.processGroup)
+			session.processGroup = 0
+		}
 		exitCode := 0
 		if command.ProcessState != nil {
 			exitCode = command.ProcessState.ExitCode()
@@ -1874,12 +2047,13 @@ func (s *Server) commandWindowsBuffered(ctx context.Context, args map[string]any
 		session.mu.Unlock()
 		return sessionSnapshot(session, false), nil
 	case <-ctx.Done():
-		// The process deliberately survives MCP request cancellation. The caller
-		// can reconnect and continue through command_poll/command_terminate.
-		session.mu.Lock()
-		session.yielded = true
-		session.mu.Unlock()
-		return sessionSnapshot(session, false), nil
+		// This request is still in-flight, so MCP cancellation means the command
+		// should stop rather than becoming an orphaned background process. Commands
+		// that already yielded a process_id are no longer attached to this request.
+		terminateCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = s.terminateCommand(terminateCtx, pid, session, 3*time.Second)
+		cancel()
+		return sessionSnapshot(session, false), ctx.Err()
 	}
 }
 
@@ -1961,6 +2135,13 @@ func sessionSnapshot(session *commandSession, deltaOnly bool) map[string]any {
 	}
 	if session.local && session.cmd != nil && session.cmd.Process != nil {
 		out["pid"] = session.cmd.Process.Pid
+	}
+	if session.processGroup != 0 {
+		out["supervised"] = true
+		out["process_limit"] = maxCommandProcesses
+	}
+	if session.supervisorReason != "" {
+		out["supervisor_reason"] = session.supervisorReason
 	}
 	if session.result != nil {
 		for k, v := range session.result {
@@ -2095,11 +2276,14 @@ func (s *Server) commandResize(ctx context.Context, args map[string]any) (map[st
 func (s *Server) terminateCommand(ctx context.Context, pid string, session *commandSession, wait time.Duration) error {
 	if session.local {
 		session.mu.Lock()
+		group := session.processGroup
 		cmd := session.cmd
+		if group != 0 {
+			_ = terminateProcessGroup(group)
+		}
 		session.mu.Unlock()
-		if cmd != nil && cmd.Process != nil {
-			// Kill the whole Windows process tree so child processes do not survive
-			// after explicit termination or a timeout.
+		if group == 0 && cmd != nil && cmd.Process != nil {
+			// Fallback for processes that could not be attached to a Windows Job Object.
 			killWindowsProcessTree(cmd)
 		}
 	} else {
@@ -2683,6 +2867,14 @@ func (s *Server) callTool(ctx context.Context, name string, args map[string]any,
 			return nil, e
 		}
 		result = r
+	case "command_list":
+		result = s.commandList()
+	case "command_emergency_terminate":
+		r, e := s.commandEmergencyTerminate(ctx, stringValue(args["process_id"]))
+		if e != nil {
+			return nil, e
+		}
+		result = r
 	case "fs_read_file":
 		p, e := s.resolvePath(args["path"])
 		if e != nil {
@@ -3145,6 +3337,18 @@ func (s *Server) discover(ctx context.Context, args map[string]any) (map[string]
 	}
 	q := strings.ToLower(strings.TrimSpace(stringValue(args["query"])))
 	sn := strings.TrimSpace(stringValue(args["server_name"]))
+	// An exact server-name query is effectively a request for that integration.
+	// Promote it to server_name so the first discover call returns the real tool
+	// inventory instead of forcing the model into a second call (or source search).
+	if sn == "" && q != "" {
+		for _, server := range servers {
+			name := strings.TrimSpace(stringValue(server["name"]))
+			if strings.EqualFold(name, q) {
+				sn = name
+				break
+			}
+		}
+	}
 	limit := int64(50)
 	if n, ok := numberAsInt(args["limit"]); ok && n > 0 {
 		limit = n
@@ -3153,9 +3357,13 @@ func (s *Server) discover(ctx context.Context, args map[string]any) (map[string]
 	forceInventoryRefresh := boolValue(args["_force_inventory_refresh"], false)
 
 	if refresh && !forceInventoryRefresh {
-		if cached, cachedAt, ok := s.cachedInventory(); ok {
-			stale := time.Since(cachedAt) > 5*time.Minute
-			if stale {
+		if cached, cachedAt, ok := s.cachedInventory(sn); ok {
+			age := time.Since(cachedAt)
+			markedStale := inventoryHasStaleServer(cached, sn)
+			stale := age > 5*time.Minute || markedStale
+			// Failed probes that fell back to a known-good tool list remain usable,
+			// but retry them in the background after a short cooldown.
+			if age > 5*time.Minute || (markedStale && age > 30*time.Second) {
 				s.refreshInventoryInBackground()
 			}
 			return inventoryResponseFromCache(cached, q, sn, limit, configPath, stale), nil
@@ -3198,6 +3406,21 @@ func (s *Server) discover(ctx context.Context, args map[string]any) (map[string]
 		}, nil
 	}
 
+	previousToolsByServer := make(map[string][]any)
+	if cached, _, ok := s.cachedInventory(""); ok {
+		for _, item := range cached {
+			server, _ := item.(map[string]any)
+			if server == nil {
+				continue
+			}
+			tools, _ := server["tools"].([]any)
+			if len(tools) == 0 {
+				continue
+			}
+			previousToolsByServer[stringValue(server["name"])] = cloneInventoryTools(tools)
+		}
+	}
+
 	type probeResult struct {
 		server map[string]any
 		tools  []any
@@ -3230,19 +3453,27 @@ func (s *Server) discover(ctx context.Context, args map[string]any) (map[string]
 	for pr := range results {
 		server := pr.server
 		name := stringValue(server["name"])
-		server["toolCount"] = len(pr.tools)
+		tools := pr.tools
 		if pr.err != nil {
 			server["inventory_error"] = pr.err.Error()
+			server["inventory_stale"] = true
+			if len(tools) == 0 {
+				if fallback := previousToolsByServer[name]; len(fallback) > 0 {
+					tools = cloneInventoryTools(fallback)
+					server["inventory_cached_fallback"] = true
+				}
+			}
 		}
+		server["toolCount"] = len(tools)
 		cachedServer := make(map[string]any, len(server)+1)
 		for k, v := range server {
 			cachedServer[k] = v
 		}
-		cachedServer["tools"] = pr.tools
+		cachedServer["tools"] = tools
 		cacheServers = append(cacheServers, cachedServer)
 		matchedServer := q == "" || strings.Contains(strings.ToLower(name+" "+stringValue(server["command"])+" "+stringValue(server["url"])), q)
 		matchedTool := false
-		for _, item := range pr.tools {
+		for _, item := range tools {
 			tm, _ := item.(map[string]any)
 			if tm == nil {
 				continue
@@ -3711,7 +3942,7 @@ func copyResultFields(dst map[string]any, payload any) {
 	if !ok {
 		return
 	}
-	for _, key := range []string{"path", "filepath", "size_bytes", "encoding", "newline", "status", "job_id", "written", "changed", "replacements", "dry_run", "diff", "media_path", "exitCode", "exit_code"} {
+	for _, key := range []string{"path", "filepath", "size_bytes", "encoding", "newline", "status", "job_id", "written", "changed", "replacements", "dry_run", "diff", "media_path", "exitCode", "exit_code", "process_id", "pid", "supervised", "process_limit", "supervisor_reason"} {
 		if v, exists := m[key]; exists {
 			dst[key] = v
 		}

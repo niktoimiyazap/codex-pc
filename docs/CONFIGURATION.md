@@ -1,108 +1,107 @@
 # Configuration
 
-CodexPC Connector loads one per-user TOML file. Environment variables may override the workspace, allowed roots, and capability switches.
+The setup UI is the preferred way to configure CodexPC. It writes the same per-user TOML file the Go connector reads, so there is no second frontend-only configuration system.
 
-## Configuration file locations
+## State directory
 
-| Platform | Path |
-| --- | --- |
-| Windows | `%LOCALAPPDATA%\CodexPCConnector\config.toml` |
-| macOS | `~/Library/Application Support/CodexPCConnector/config.toml` |
-| Linux | `$XDG_STATE_HOME/codexpc-connector/config.toml` or `~/.local/state/codexpc-connector/config.toml` |
+Default on Windows:
 
-Set `CODEXPC_STATE_DIR` to move the entire state directory, including configuration, logs, and the single-instance lock.
-
-## Minimal configuration
-
-```toml
-workspace = "~/projects"
-allowed_roots = ["~/projects"]
-
-enable_process = false
-enable_shell = false
-enable_delete = true
+```text
+%LOCALAPPDATA%\CodexPCConnector
 ```
 
-Copy `config.example.toml` as a starting point. Keep real configuration outside the repository.
+Set `CODEXPC_STATE_DIR` to move the entire state directory. This also moves configuration, logs, sessions, locks, frontend auth state and DPAPI-protected CodexPC secrets.
 
-## Options
+The non-secret configuration file is:
+
+```text
+<state-dir>\config.toml
+```
+
+## Example
+
+```toml
+workspace = "C:/Users/you/projects"
+allowed_roots = ["C:/Users/you/projects"]
+
+default_startup_timeout_sec = 45
+default_tool_timeout_sec = 120
+max_output_chars = 100000
+mcp_inventory_ttl_sec = 300
+
+tool_profile = "core"
+
+tunnel_profile = "codex"
+tunnel_id = "tunnel_0123456789abcdef0123456789abcdef"
+organization = ""
+
+log_level = "INFO"
+```
+
+The runtime API key is deliberately absent. On Windows the setup UI stores it separately using DPAPI for the current Windows account.
+
+## Supported keys
 
 ### `workspace`
 
-Working directory used when starting `codex app-server` and the default context for relative process paths.
+Default working directory for project operations and relative command paths.
 
 Default: the current user's home directory.
 
 ### `allowed_roots`
 
-List of filesystem roots the connector may access. Paths are expanded and resolved before authorization.
+Filesystem roots CodexPC is allowed to access. Use the narrowest roots that cover the intended work.
 
 Default: the current user's home directory.
 
-Use the narrowest roots that cover the intended work. Do not add an entire system drive unless the connector genuinely requires it.
+### `default_startup_timeout_sec`
 
-### `enable_process`
+Startup budget used for connector/app-server initialization paths.
 
-Enables direct program execution through `run_process` and the managed job tools.
-
-Default: `false`.
-
-### `enable_shell`
-
-Enables shell command strings through `run_command`. This requires `enable_process=true` as well.
-
-Default: `false`.
-
-Prefer `run_process` with an argument vector when possible. It avoids shell quoting and interpolation hazards.
-
-### `enable_delete`
-
-Enables file and directory deletion after path authorization.
-
-Default: `true`.
-
-Set it to `false` for read/write-only deployments.
+Default: `45`.
 
 ### `default_tool_timeout_sec`
 
-Default timeout for app-server JSON-RPC calls and local process execution when a call does not provide a more specific timeout.
+Default timeout used by tool operations that need a request-level budget and do not provide a more specific value.
 
 Default: `120`.
 
+Long-running Windows commands are session-oriented and can continue after the initial MCP call returns a running process handle.
+
 ### `max_output_chars`
 
-Maximum serialized result size returned to the MCP client.
+Maximum normalized output size returned by the connector for bounded tool results.
 
 Default: `100000`.
 
-### `max_read_chars`
-
-Maximum number of decoded text characters returned by `read_file`.
-
-Default: `500000`.
-
-### `max_job_history`
-
-Maximum number of managed process jobs retained for inspection.
-
-Default: `100`; minimum effective value: `10`.
-
 ### `mcp_inventory_ttl_sec`
 
-Number of seconds for which the shared downstream MCP inventory is considered fresh. Stale disk-cached data remains immediately available while a background refresh runs.
+How long a downstream MCP inventory remains fresh before CodexPC refreshes it.
 
-Default: `300`; minimum effective value: `1`.
+Default: `300`.
 
 ### `tool_profile`
 
-Controls which tools are advertised to the MCP client:
+Controls the advertised tool surface:
 
-- `core` exposes the normal development workflow and hides duplicate compatibility aliases, desktop `SendKeys`, and connector diagnostics.
-- `full` exposes every compatibility and diagnostic tool.
-
-Hidden compatibility handlers remain implemented, but new clients do not receive their schemas in `core` mode.
+- `core` — normal production surface with compatibility/diagnostic noise hidden;
+- `full` — compatibility and additional diagnostic tools are also advertised.
 
 Default: `core`.
+
+### `tunnel_profile`
+
+Local `tunnel-client` profile name used by the Windows start wrapper.
+
+Default: `codex`.
+
+### `tunnel_id`
+
+OpenAI Tunnel ID used by the runtime. The setup UI validates its format and tunnel configuration before committing changes.
+
+### `organization`
+
+Optional local organization label stored with the CodexPC setup metadata.
 
 ### `log_level`
 
@@ -110,80 +109,65 @@ Structured connector log level.
 
 Default: `INFO`.
 
-## Environment overrides
+## Connector environment overrides
+
+The Go config loader supports these direct overrides:
 
 | Variable | Purpose |
 | --- | --- |
-| `CODEXPC_STATE_DIR` | Override the state directory |
+| `CODEXPC_STATE_DIR` | Move the complete state directory |
 | `CODEXPC_WORKSPACE` | Override `workspace` |
-| `CODEXPC_ALLOWED_ROOTS` | Override `allowed_roots`; use the platform path separator |
-| `CODEXPC_ENABLE_PROCESS` | Override `enable_process` |
-| `CODEXPC_ENABLE_SHELL` | Override `enable_shell` |
-| `CODEXPC_ENABLE_DELETE` | Override `enable_delete` |
-| `CODEXPC_TOOL_PROFILE` | Override `tool_profile` with `core` or `full` |
+| `CODEXPC_ALLOWED_ROOTS` | Override `allowed_roots` using the platform path separator |
+| `CODEXPC_TOOL_PROFILE` | Override `tool_profile` (`core` or `full`) |
 
-Boolean values accept `1`, `true`, `yes`, or `on` as true; other values are false.
+## Windows launcher overrides
 
-## MCP client example
+The installer/start scripts also recognize a few operational variables:
 
-The exact format depends on the MCP host. A typical stdio entry points to the installed command:
+| Variable | Purpose |
+| --- | --- |
+| `TUNNEL_CLIENT_PATH` | Explicit path to `tunnel-client.exe` |
+| `CODEXPC_PYTHONW_PATH` | Explicit Python GUI runtime for `frontend/server.pyw` |
+| `CODEXPC_NO_INTRO=1` | Skip the animated terminal intro in `start.cmd` |
 
-```json
-{
-  "mcpServers": {
-    "CodexPC": {
-      "command": "codexpc-connector",
-      "args": []
-    }
-  }
-}
+These are launcher settings, not normal application configuration.
+
+## Manual source checkout
+
+For normal users, `install.cmd` creates and validates the tunnel profile automatically.
+
+For direct local MCP testing from a source checkout, the stdio command can point to:
+
+```text
+scripts\wrapper.cmd
 ```
 
-For a source checkout on Windows, the command may instead point to `wrapper.cmd` using an absolute path.
+That wrapper simply launches the current `dist\codexpc-go.exe` and fails clearly when the binary has not been built yet.
 
-## Recommended profiles
+Build it with:
 
-### Filesystem-only
-
-```toml
-workspace = "~/projects"
-allowed_roots = ["~/projects"]
-enable_process = false
-enable_shell = false
-enable_delete = false
+```bat
+scripts\build.cmd -NoDesktopCopy
 ```
-
-### Development workstation
-
-```toml
-workspace = "~/projects"
-allowed_roots = ["~/projects"]
-enable_process = true
-enable_shell = true
-enable_delete = true
-default_tool_timeout_sec = 180
-```
-
-Shell and process access are privileged. Enable them only for a trusted local MCP client.
 
 ## Troubleshooting
 
-### `Codex CLI was not found in PATH`
+### Setup keeps opening
 
-Install or update Codex CLI and verify that `codex --version` works in the same environment used by the MCP host.
+The configuration is not considered complete until a valid Tunnel ID, saved runtime key and successful tunnel validation are present. Open `http://127.0.0.1:8765/setup/` and finish the setup flow.
 
-### Access denied for a path
+### A path is denied
 
-Add the narrowest appropriate parent directory to `allowed_roots`, then restart the connector. Relative paths are resolved before authorization, so verify the effective workspace as well.
+Add the narrowest appropriate parent directory to `allowed_roots`. Paths are resolved before authorization.
 
-### Process or shell execution is disabled
+### The frontend cannot start
 
-Set `enable_process=true`. For `run_command`, also set `enable_shell=true`, then restart the connector.
+Run `install.cmd` again. It repairs missing runtime dependencies and persists the discovered Python runtime path.
 
-### A second connector instance fails to start
+### The tunnel cannot start
 
-Only one process may use the same state directory. Stop the existing instance or assign a separate `CODEXPC_STATE_DIR`.
+Open Setup & settings and validate the Tunnel ID/runtime key again. CodexPC tests new tunnel data before replacing the active profile.
 
-### Text appears corrupted
+### A second connector instance fails
 
-Use `write_file` for text writes and explicitly select `utf-8` when reading uncertain files. The repository self-check rejects non-UTF-8 project text and common mojibake patterns.
+Only one connector may own a state directory at a time. Use a different `CODEXPC_STATE_DIR` only when you intentionally want an isolated second runtime.

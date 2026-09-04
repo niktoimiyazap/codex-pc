@@ -1,11 +1,78 @@
 ﻿param()
 $ErrorActionPreference = 'Continue'
 $Repo = Split-Path -Parent $PSScriptRoot
-$Monitor = Join-Path $Repo 'monitor_ui\CodexPC Monitor.pyw'
+$Monitor = Join-Path $Repo 'frontend\server.pyw'
 $FrontUrl = 'http://127.0.0.1:8765/'
-$StateDir = Join-Path $env:LOCALAPPDATA 'CodexPCConnector'
+$StateDir = if ($env:CODEXPC_STATE_DIR) { $env:CODEXPC_STATE_DIR } else { Join-Path $env:LOCALAPPDATA 'CodexPCConnector' }
+$StateBin = Join-Path $StateDir 'bin'
+$ConfigPath = Join-Path $StateDir 'config.toml'
+$TunnelKeyPath = Join-Path $StateDir 'tunnel-runtime-key.dpapi'
+$SetupPendingPath = Join-Path $StateDir 'setup.pending.json'
 $WrapperPidFile = Join-Path $StateDir 'wrapper.pid'
 New-Item -ItemType Directory -Path $StateDir -Force | Out-Null
+
+function Show-CodexPCIntro {
+  if ($env:CODEXPC_NO_INTRO -eq '1' -or [Console]::IsOutputRedirected) { return }
+
+  $art = @(
+    '   ____          _           ____   ____'
+    '  / ___|___   __| | _____  _|  _ \ / ___|'
+    ' | |   / _ \ / _` |/ _ \ \/ / |_) | |'
+    ' | |__| (_) | (_| |  __/>  <|  __/| |___'
+    '  \____\___/ \__,_|\___/_/\_\_|    \____|'
+  )
+
+  $cursorVisible = $true
+  try {
+    $cursorVisible = [Console]::CursorVisible
+    [Console]::CursorVisible = $false
+    Clear-Host
+
+    $maxWidth = [int](($art | Measure-Object -Property Length -Maximum).Maximum)
+    $left = [Math]::Max(0, [int](([Console]::WindowWidth - $maxWidth) / 2))
+    $top = [Math]::Max(1, [int](([Console]::WindowHeight - $art.Count) / 2) - 1)
+    $steps = 18
+
+    for ($step = 1; $step -le $steps; $step++) {
+      $visible = [Math]::Ceiling($maxWidth * ($step / [double]$steps))
+      for ($row = 0; $row -lt $art.Count; $row++) {
+        $line = $art[$row]
+        $take = [Math]::Min([int]$visible, $line.Length)
+        $piece = if ($take -gt 0) { $line.Substring(0, $take) } else { '' }
+        [Console]::SetCursorPosition($left, $top + $row)
+        Write-Host ($piece.PadRight($maxWidth)) -NoNewline -ForegroundColor Gray
+      }
+      Start-Sleep -Milliseconds 24
+    }
+
+    for ($row = 0; $row -lt $art.Count; $row++) {
+      [Console]::SetCursorPosition($left, $top + $row)
+      Write-Host ($art[$row].PadRight($maxWidth)) -NoNewline -ForegroundColor White
+    }
+    Start-Sleep -Milliseconds 190
+
+    foreach ($color in @('Gray', 'DarkGray', 'Black')) {
+      for ($row = 0; $row -lt $art.Count; $row++) {
+        [Console]::SetCursorPosition($left, $top + $row)
+        Write-Host ($art[$row].PadRight($maxWidth)) -NoNewline -ForegroundColor $color
+      }
+      Start-Sleep -Milliseconds 85
+    }
+
+    Clear-Host
+  } catch {
+    Clear-Host
+  } finally {
+    try { [Console]::CursorVisible = $cursorVisible } catch {}
+  }
+
+  Write-Host 'CodexPC' -ForegroundColor White
+  Write-Host 'Starting local connector...' -ForegroundColor DarkGray
+  Write-Host ''
+}
+
+Show-CodexPCIntro
+
 if (Test-Path -LiteralPath $WrapperPidFile) {
   $oldWrapperPid = 0
   [void][int]::TryParse((Get-Content -LiteralPath $WrapperPidFile -Raw -ErrorAction SilentlyContinue).Trim(), [ref]$oldWrapperPid)
@@ -20,13 +87,13 @@ if (Test-Path -LiteralPath $WrapperPidFile) {
 Set-Content -LiteralPath $WrapperPidFile -Value $PID -Encoding Ascii
 
 # Desktop shortcuts inherit the environment of Explorer, which may still have
-# values from before the tunnel key or developer tools were installed.
-$savedTunnelKey = [Environment]::GetEnvironmentVariable('CONTROL_PLANE_API_KEY', 'User')
-if ($savedTunnelKey) { $env:CONTROL_PLANE_API_KEY = $savedTunnelKey }
-
-$pythonDir = Join-Path $env:LOCALAPPDATA 'Programs\Python\Python313'
-$pythonScripts = Join-Path $pythonDir 'Scripts'
-$toolDirs = @((Join-Path $env:USERPROFILE 'bin'), (Join-Path $env:APPDATA 'npm'), $pythonDir, $pythonScripts)
+# an old PATH. Add CodexPC-managed runtime locations explicitly.
+$pythonDirs = @('Python314','Python313','Python312','Python311') | ForEach-Object { Join-Path $env:LOCALAPPDATA "Programs\Python\$_" }
+$toolDirs = @($StateBin, (Join-Path $env:USERPROFILE 'bin'), (Join-Path $env:APPDATA 'npm'))
+foreach ($pythonDir in $pythonDirs) {
+  $toolDirs += $pythonDir
+  $toolDirs += (Join-Path $pythonDir 'Scripts')
+}
 foreach ($toolDir in $toolDirs) {
   if ($toolDir -and (Test-Path -LiteralPath $toolDir) -and (($env:Path -split ';') -notcontains $toolDir)) {
     $env:Path = "$toolDir;$env:Path"
@@ -75,7 +142,10 @@ function Resolve-TunnelClient {
   if (-not $command) { $command = Get-Command tunnel-client -ErrorAction SilentlyContinue }
   if ($command) { $candidates += $command.Source }
 
+  $persisted = [Environment]::GetEnvironmentVariable('TUNNEL_CLIENT_PATH', 'User')
+  if ($persisted) { $candidates += $persisted }
   $candidates += @(
+    (Join-Path $StateBin 'tunnel-client.exe'),
     (Join-Path $env:USERPROFILE 'bin\tunnel-client.exe'),
     (Join-Path $env:LOCALAPPDATA 'Microsoft\WinGet\Links\tunnel-client.exe'),
     (Join-Path $Repo '.local\bin\tunnel-client.exe')
@@ -87,6 +157,37 @@ function Resolve-TunnelClient {
     }
   }
   return $null
+}
+function Read-ConfigValue([string]$Name,[string]$Default='') {
+  if (-not (Test-Path -LiteralPath $ConfigPath)) { return $Default }
+  try {
+    foreach ($line in Get-Content -LiteralPath $ConfigPath -ErrorAction Stop) {
+      $trimmed = $line.Trim()
+      if (-not $trimmed -or $trimmed.StartsWith('#') -or -not $trimmed.Contains('=')) { continue }
+      $parts = $trimmed.Split('=',2)
+      if ($parts[0].Trim() -ne $Name) { continue }
+      $raw = $parts[1].Trim()
+      if ($raw.StartsWith('"')) {
+        try { return ($raw | ConvertFrom-Json) } catch { return $raw.Trim('"') }
+      }
+      return $raw
+    }
+  } catch {}
+  return $Default
+}
+function Read-TunnelKey {
+  if (Test-Path -LiteralPath $TunnelKeyPath) {
+    try {
+      $encoded = (Get-Content -LiteralPath $TunnelKeyPath -Raw -ErrorAction Stop).Trim()
+      $protected = [Convert]::FromBase64String($encoded)
+      $plain = [Security.Cryptography.ProtectedData]::Unprotect($protected,$null,[Security.Cryptography.DataProtectionScope]::CurrentUser)
+      return [Text.Encoding]::UTF8.GetString($plain)
+    } catch {
+      Log 'WARN' 'Saved tunnel credential could not be decrypted for this Windows account.' Yellow
+    }
+  }
+  # One-release compatibility path for users upgrading from the previous launcher.
+  return [Environment]::GetEnvironmentVariable('CONTROL_PLANE_API_KEY', 'User')
 }
 
 Log 'INFO' "CodexPC start wrapper repo=$Repo" Cyan
@@ -148,13 +249,36 @@ if ($frontReady) {
 } else { Log 'ERROR' 'Frontend failed to bind 127.0.0.1:8765' Red }
 
 Network-State
-Log 'INFO' 'Starting tunnel profile=codex' Cyan
 $attempt = 0
+$waitingForSetup = $false
 while ($true) {
+  $profile = Read-ConfigValue 'tunnel_profile' 'codex'
+  $tunnelId = Read-ConfigValue 'tunnel_id' ''
+  $tunnelKey = Read-TunnelKey
+  $setupPending = Test-Path -LiteralPath $SetupPendingPath
+  if ($setupPending -or -not $tunnelKey -or $tunnelId -notmatch '^tunnel_[0-9a-f]{32}$') {
+    if (-not $waitingForSetup) {
+      Log 'SETUP' 'Waiting for a validated setup in the CodexPC frontend.' Yellow
+      Log 'SETUP' 'Complete Setup & settings; the tunnel starts only after validation passes.' DarkGray
+      $waitingForSetup = $true
+    }
+    Remove-Item Env:CONTROL_PLANE_API_KEY -ErrorAction SilentlyContinue
+    Remove-Item Env:CONTROL_PLANE_TUNNEL_ID -ErrorAction SilentlyContinue
+    $tunnelKey = $null
+    Start-Sleep -Seconds 2
+    continue
+  }
+  if ($waitingForSetup) { Log 'SETUP' 'Configuration detected. Starting tunnel.' Green }
+  $waitingForSetup = $false
+  $env:CONTROL_PLANE_API_KEY = $tunnelKey
+  $env:CONTROL_PLANE_TUNNEL_ID = $tunnelId
   $attempt++
-  Log 'INFO' "Tunnel launch attempt=$attempt" Magenta
-  & $tunnelClient run --profile codex
+  Log 'INFO' "Tunnel launch attempt=$attempt profile=$profile" Magenta
+  & $tunnelClient run --profile $profile
   $exit = $LASTEXITCODE
+  Remove-Item Env:CONTROL_PLANE_API_KEY -ErrorAction SilentlyContinue
+  Remove-Item Env:CONTROL_PLANE_TUNNEL_ID -ErrorAction SilentlyContinue
+  $tunnelKey = $null
   Log 'ERROR' "Tunnel stopped exit_code=$exit" Red
   $connector = @(Get-Process codexpc-go -ErrorAction SilentlyContinue)
   Log 'STATE' "connector_processes=$($connector.Count)" $(if($connector.Count){'Yellow'}else{'DarkGray'})
