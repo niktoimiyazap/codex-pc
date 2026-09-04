@@ -77,21 +77,56 @@ It prepares:
 - the official OpenAI `tunnel-client`;
 - Go modules, tests, the production build and smoke verification.
 
-### 3. Finish setup in the local UI
+### 3. Create an OpenAI Secure MCP Tunnel
+
+Open [Platform → Organization → Tunnels](https://platform.openai.com/settings/organization/tunnels) and create a tunnel for CodexPC.
+
+You need:
+
+- **Tunnels: Read + Manage** to create or edit a tunnel;
+- **Tunnels: Read + Use** for the account/service that will run the tunnel and attach it in ChatGPT.
+
+When creating the tunnel, associate it with the **ChatGPT workspace that will use CodexPC**. After creation, copy its ID — it looks like:
+
+```text
+tunnel_0123456789abcdef0123456789abcdef
+```
+
+Then create a **Restricted runtime API key** in [Platform → Organization → API keys](https://platform.openai.com/settings/organization/api-keys) with **Tunnels: Read + Use**. This is the `CONTROL_PLANE_API_KEY` used by `tunnel-client`; it is not an admin key and is not pasted into ChatGPT.
+
+See [First-run & tunnel setup](docs/TUNNEL_SETUP.md) for the full permissions and troubleshooting flow.
+
+### 4. Finish setup in the local UI
 
 After installation, CodexPC opens its local setup page. Choose:
 
 - your default workspace;
 - `core` or `full` tool profile;
-- your OpenAI Tunnel ID;
-- a runtime API key with the required tunnel permissions;
+- the OpenAI Tunnel ID from the previous step;
+- the restricted runtime API key;
 - optional tunnel profile / organization labels.
 
 Non-secret values are written to the normal CodexPC config. The runtime key is encrypted for the current Windows account with **DPAPI** and is never stored in TOML or browser LocalStorage.
 
 Before saving a new tunnel configuration, CodexPC validates it in an isolated temporary profile with `tunnel-client doctor`. A bad key or Tunnel ID does not overwrite a working setup.
 
-### 4. Daily launch
+### 5. Connect CodexPC in ChatGPT
+
+Keep CodexPC running, then open ChatGPT on the web and enable **Developer mode** for your account/workspace if required by your plan.
+
+Create a custom app from **Settings → Apps → Create** (or **Workspace settings → Apps → Create** for workspace admins):
+
+1. set **Connection** to **Tunnel**;
+2. select the CodexPC tunnel, or paste its `tunnel_...` ID;
+3. click **Scan Tools** and wait for CodexPC tools to appear;
+4. click **Create**;
+5. select the new CodexPC app when sending a message in ChatGPT.
+
+The runtime API key stays on your PC. ChatGPT only needs access to the tunnel object.
+
+OpenAI currently exposes full custom MCP write/modify actions to Business and Enterprise/Edu workspaces; Pro can use custom MCP apps in developer mode with read/fetch permissions. Product UI and availability may change while MCP support is in beta.
+
+### 6. Daily launch
 
 After first setup, use:
 
